@@ -1,3 +1,11 @@
+use kaleidoscope::lexer::Lexer;
+
 fn main() {
-    println!("Hola");
+    let stdin = std::io::stdin();
+    let _lexer = Lexer::new(stdin.lock());
+
+    eprint!("ready> ");
+    run();
 }
+
+fn run() {}
