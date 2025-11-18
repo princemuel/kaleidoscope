@@ -1,0 +1,24 @@
+# Project configuration for Clippy Rust code linter.
+# See full lints list at:
+# https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Minimum Supported Rust Version (conservative for WASM tooling)
+msrv = "1.90"
+# Complexity thresholds (stricter for WASM due to size concerns)
+cognitive-complexity-threshold = 18
+too-many-arguments-threshold = 12
+type-complexity-threshold = 150
+# API stability (important for JS interop)
+avoid-breaking-exported-api = true
+# WASM-specific considerations
+missing-docs-in-crate-items = false
+# Additional lints useful for WASM
+disallowed-methods = [] # Add methods you want to avoid in WASM context
+# Size thresholds
+pass-by-value-size-limit = 256
+trivial-copy-size-limit = 64
+# Other useful settings
+max-fn-params-bools = 6
+max-trait-bounds = 6
+warn-on-all-wildcard-imports = true
+single-char-binding-names-threshold = 6
