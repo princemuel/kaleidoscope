@@ -1,3 +1,45 @@
 {
-  "rust-analyzer.check.noDefaultFeatures": true
+  "editor.wordWrap": "bounded",
+  "editor.wordWrapColumn": 132,
+  "editor.formatOnSave": true,
+  "editor.bracketPairColorization.independentColorPoolPerBracketType": true,
+  "files.autoSave": "off",
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "explicit",
+    "source.organizeImports": "explicit",
+    "source.addMissingImports": "explicit"
+  },
+  // Rust Analyzer settings
+  "rust-analyzer.assist.preferSelf": true,
+  "rust-analyzer.assist.emitMustUse": true,
+  // Cargo
+  "rust-analyzer.cargo.features": "all",
+  "rust-analyzer.cargo.targetDir": true,
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.checkOnSave": true,
+  // Auto import and organize imports
+  "rust-analyzer.completion.autoimport.enable": true,
+  "rust-analyzer.imports.group.enable": true,
+  "rust-analyzer.imports.granularity.enforce": true,
+  "rust-analyzer.imports.granularity.group": "module",
+  "rust-analyzer.imports.prefix": "crate",
+  "rust-analyzer.imports.merge.glob": true,
+  "rust-analyzer.imports.prefixExternPrelude": false,
+  "rust-analyzer.imports.preferNoStd": true,
+  "rust-analyzer.imports.preferPrelude": true,
+  // Inlay Hints
+  "rust-analyzer.inlayHints.typeHints.enable": false,
+  "rust-analyzer.inlayHints.chainingHints.enable": false,
+  // Formatting with rustfmt
+  "rust-analyzer.rustfmt.extraArgs": ["+nightly"],
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer",
+    "editor.formatOnSave": true
+  },
+  "rust-analyzer.testExplorer": true,
+  "rust-analyzer.semanticHighlighting.punctuation.enable": true,
+  "markdown.validate.enabled": true,
+  "workbench.editor.customLabels.patterns": {
+    "**/mod.rs": "${dirname}.rs"
+  }
 }
