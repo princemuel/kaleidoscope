@@ -1,13 +1,15 @@
 [package]
-  name = "kaleidoscope"
-  version = "0.1.0"
-  edition = "2024"
+name = "kaleidoscope"
+version = "0.1.0"
+edition = "2024"
 
 [features]
-  default = []
-  # codegen = ["inkwell"]
-  # jit = ["codegen", "libc"]
-  # debug-info = ["codegen"]
-  # full = ["codegen", "jit", "debug-info"]
+default = []
+# codegen = ["inkwell"]
+# jit = ["codegen", "libc"]
+# debug-info = ["codegen"]
+# full = ["codegen", "jit", "debug-info"]
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+inkwell = { version = "0.7", features = ["llvm21-1"] }

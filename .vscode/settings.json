@@ -1,9 +1,8 @@
 {
   "editor.wordWrap": "bounded",
-  "editor.wordWrapColumn": 132,
+  "editor.wordWrapColumn": 120,
   "editor.formatOnSave": true,
   "editor.bracketPairColorization.independentColorPoolPerBracketType": true,
-  "files.autoSave": "off",
   "editor.codeActionsOnSave": {
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",

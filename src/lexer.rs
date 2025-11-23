@@ -1,93 +1,116 @@
-use std::io::BufRead;
+//! The Kaleidoscope Lexer
+
+use core::iter::Peekable;
+use core::str::Chars;
+use std::io;
 
 use crate::token::Token;
 
-pub struct Lexer<R: BufRead> {
-    input:     R,
-    last_char: Option<char>,
+pub struct Lexer<'a> {
+    pos:   usize,
+    input: &'a str,
+    chars: Box<Peekable<Chars<'a>>>,
 }
 
-impl<R: BufRead> Lexer<R> {
-    pub const fn new(input: R) -> Self {
+impl<'a> Lexer<'a> {
+    /// Creates a new `Lexer`,
+    pub fn new(input: &'a str) -> Self {
         Self {
             input,
-            last_char: Some(' '),
+            chars: Box::new(input.chars().peekable()),
+            pos: 0,
         }
     }
 
-    pub fn get_token(&mut self) -> Token {
-        // Skip any whitespace
-        while self.last_char.is_some_and(char::is_whitespace) {
-            self.last_char = self.get_char();
-        }
+    pub fn token(&mut self) -> io::Result<Token> {
+        self.skip_whitespace();
+
+        let start = self.pos;
 
         // Check for end of file. Don't eat the EOF.
-        let current = match self.last_char {
+        let &ch = match self.chars.peek() {
             Some(c) => c,
-            None => return Token::Eof,
+            None => return Ok(Token::EOF),
         };
 
-        // identifier: [a-zA-Z][a-zA-Z0-9]*
-        if current.is_alphabetic() {
-            let mut value = String::from(current);
-            loop {
-                self.last_char = self.get_char();
-                match self.last_char {
-                    Some(ch) if ch.is_alphanumeric() => value.push(ch),
-                    _ => break,
-                }
-            }
+        self.advance();
 
-            return match value.as_str() {
-                "def" => Token::Def,
-                "extern" => Token::Extern,
-                _ => Token::Identifier(value),
-            };
-        }
+        let token = match ch {
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            ',' => Token::Comma,
+            '#' => self.lex_comment(),
+            '.' | '0'..='9' => self.lex_number(start),
+            'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(start),
+            op => Token::Op(op),
+        };
 
-        // Number: [0-9.]+
-        // ! NOTE: this isn’t doing sufficient error checking:
-        // ! It will incorrectly read “1.23.45.67” and assume it is “1.23”.
-        if current.is_ascii_digit() || current == '.' {
-            let mut value = String::from(current);
-            loop {
-                self.last_char = self.get_char();
-                match self.last_char {
-                    Some(ch) if ch.is_ascii_digit() || ch == '.' => value.push(ch),
-                    _ => break,
-                }
-            }
-
-            return Token::Number(value.parse().unwrap_or_default());
-        }
-
-        // Comment until end of line
-        if current == '#' {
-            loop {
-                self.last_char = self.get_char();
-                match self.last_char {
-                    None | Some('\n') | Some('\r') => break,
-                    _ => continue,
-                }
-            }
-
-            if self.last_char.is_some() {
-                return self.get_token();
-            }
-        }
-
-        // Otherwise, just return the character as its ascii value.
-        let this_char = current;
-        self.last_char = self.get_char();
-        Token::Char(this_char)
+        Ok(token)
     }
 
-    fn get_char(&mut self) -> Option<char> {
-        let mut buffer = [0; 1];
+    #[inline]
+    fn advance(&mut self) {
+        self.chars.next();
+        self.pos += 1;
+    }
 
-        match self.input.read_exact(&mut buffer) {
-            Ok(_) => Some(buffer[0] as char),
-            Err(_) => None,
+    fn skip_whitespace(&mut self) {
+        while let Some(&ch) = self.chars.peek() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    fn lex_comment(&mut self) -> Token {
+        while let Some(&ch) = self.chars.peek() {
+            self.advance();
+            if ch == '\n' || ch == '\r' {
+                break;
+            }
+        }
+        Token::Comment
+    }
+
+    fn lex_number(&mut self, start: usize) -> Token {
+        while let Some(&ch) = self.chars.peek() {
+            if ch != '.' && !ch.is_ascii_hexdigit() {
+                break;
+            }
+            self.advance();
+        }
+
+        let slice = &self.input[start..self.pos];
+        Token::Number(slice.parse().unwrap_or_default())
+    }
+
+    fn lex_ident(&mut self, start: usize) -> Token {
+        while let Some(&ch) = self.chars.peek() {
+            if ch != '_' && !ch.is_alphanumeric() {
+                break;
+            }
+            self.advance();
+        }
+
+        match &self.input[start..self.pos] {
+            "def" => Token::Def,
+            "extern" => Token::Extern,
+            "binary" => Token::Binary,
+            ident => Token::Ident(ident.to_string()),
+        }
+    }
+}
+
+impl Iterator for Lexer<'_> {
+    type Item = Token;
+
+    /// Lexes the next `Token` and returns it. `None` is returned on EOF or
+    /// failure
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.token() {
+            Ok(Token::EOF) | Err(_) => None,
+            Ok(value) => Some(value),
         }
     }
 }

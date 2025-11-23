@@ -1,13 +1,17 @@
-/// The lexer returns tokens [0-255] if it is an unknown character, otherwise one
-/// of these for known things.
+/// The lexer returns tokens [0-255] if it is an unknown character, otherwise
+/// one of these for known things.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Eof,
-    // commands
+    Binary,
+    Comma,
+    Comment,
     Def,
+    EOF,
     Extern,
-    // primary
-    Identifier(String),
+    Ident(String),
+    LParen,
     Number(f64),
-    Char(char),
+    Op(char),
+    RParen,
+    // ! remeber to update `Lexer:lex_ident`
 }
