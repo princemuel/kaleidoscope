@@ -7,6 +7,7 @@ use crate::ast::{Expr, Function, Prototype};
 use crate::lexer::Lexer;
 use crate::token::Token;
 
+#[derive(Clone, Copy)]
 enum PE {
     Syntax,
     Eof,
@@ -16,9 +17,9 @@ const FUNC_NAME: &str = "anon";
 pub struct Parser<'a> {
     tokens: Vec<Token>,
     /// The current position of the token the parser is looking at.
-    pos:    usize,
+    pos: usize,
     /// Holds the precedence for each binary operator.
-    prec:   &'a mut HashMap<char, i32>,
+    prec: &'a mut HashMap<char, i32>,
 }
 
 impl<'a> Parser<'a> {
@@ -26,7 +27,11 @@ impl<'a> Parser<'a> {
         let mut lexer = Lexer::new(input.as_ref());
         let tokens = lexer.by_ref().collect();
 
-        Self { tokens, prec, pos: 0 }
+        Self {
+            tokens,
+            prec,
+            pos: 0,
+        }
     }
 
     /// Parses the content of the parser.
@@ -39,12 +44,12 @@ impl<'a> Parser<'a> {
 
         match result {
             Ok(result) => {
-                if !self.is_eof() {
-                    Err(self.log_err(PE::Eof, "Unexpected token after parsed expression."))
-                } else {
+                if self.is_eof() {
                     Ok(result)
+                } else {
+                    Err(self.log_err(PE::Eof, "Unexpected token after parsed expression."))
                 }
-            },
+            }
             err => err,
         }
     }
@@ -72,10 +77,12 @@ impl<'a> Parser<'a> {
 
     /// Returns a value indicating whether or not the `Parser`
     /// has reached the end of the input.
+    #[must_use]
     pub const fn is_eof(&self) -> bool { self.pos >= self.tokens.len() }
 
     /// Returns the precedence of the current `Token`, or -1 if it is not
     /// recognized as a binary operator.
+    #[must_use]
     pub fn tok_precedence(&self) -> i32 {
         match self.current() {
             Ok(Token::Op(op)) => self.prec.get(&op).copied().unwrap_or(-1),
@@ -116,7 +123,7 @@ impl<'a> Parser<'a> {
                     PE::Syntax,
                     "Expected '(' character at start of parenthesized expression.",
                 ));
-            },
+            }
         }
 
         self.advance()?;
@@ -130,7 +137,7 @@ impl<'a> Parser<'a> {
                     PE::Syntax,
                     "Expected ')' character at end of parenthesized expression.",
                 ));
-            },
+            }
         }
 
         self.advance()?;
@@ -143,7 +150,7 @@ impl<'a> Parser<'a> {
     ///
     /// identifierexpr ::= identifier ::= identifier '(' expression* ')'
     pub fn parse_ident_expr(&mut self) -> io::Result<Expr> {
-        let ident = if let Token::Ident(id) = &self.current()? {
+        let ident = if let Token::Ident(ref id) = self.current()? {
             id.clone()
         } else {
             return Err(self.log_err(PE::Syntax, "Expected identifier"));
@@ -173,10 +180,9 @@ impl<'a> Parser<'a> {
                         Token::Comma => (),
                         Token::RParen => break,
                         _ => {
-                            return Err(
-                                self.log_err(PE::Syntax, "Expected ',' character in function call.")
-                            );
-                        },
+                            return Err(self
+                                .log_err(PE::Syntax, "Expected ',' character in function call."));
+                        }
                     }
 
                     self.advance()?;
@@ -185,7 +191,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
 
                 Ok(Expr::Call { name: ident, args })
-            },
+            }
 
             _ => Ok(Expr::Variable(ident)),
         }
@@ -215,7 +221,7 @@ impl<'a> Parser<'a> {
                     name,
                     args: vec![self.parse_unary_expr()?],
                 })
-            },
+            }
             _ => self.parse_primary(),
         }
     }
@@ -228,9 +234,8 @@ impl<'a> Parser<'a> {
                 return Ok(lhs);
             }
 
-            let op = match self.current()? {
-                Token::Op(op) => op,
-                _ => return Err(self.log_err(PE::Syntax, "Invalid operator.")),
+            let Token::Op(op) = self.current()? else {
+                return Err(self.log_err(PE::Syntax, "Invalid operator."));
             };
 
             self.advance()?;
@@ -259,18 +264,16 @@ impl<'a> Parser<'a> {
             Token::Ident(id) => {
                 self.advance()?;
                 (id, false, 0)
-            },
+            }
 
             Token::Binary => {
                 self.advance()?;
 
-                let op = match self.current()? {
-                    Token::Op(ch) => ch,
-                    _ => {
-                        return Err(
-                            self.log_err(PE::Syntax, "Expected operator in custom operator declaration.")
-                        );
-                    },
+                let Token::Op(op) = self.current()? else {
+                    return Err(self.log_err(
+                        PE::Syntax,
+                        "Expected operator in custom operator declaration.",
+                    ));
                 };
 
                 self.advance()?;
@@ -287,14 +290,23 @@ impl<'a> Parser<'a> {
                 self.prec.insert(op, prec as i32);
 
                 (name, true, prec)
-            },
+            }
 
-            _ => return Err(self.log_err(PE::Syntax, "Expected identifier in prototype declaration.")),
+            _ => {
+                return Err(
+                    self.log_err(PE::Syntax, "Expected identifier in prototype declaration.")
+                );
+            }
         };
 
         match self.current()? {
             Token::LParen => (),
-            _ => return Err(self.log_err(PE::Syntax, "Expected '(' character in prototype declaration.")),
+            _ => {
+                return Err(self.log_err(
+                    PE::Syntax,
+                    "Expected '(' character in prototype declaration.",
+                ));
+            }
         }
 
         self.advance()?;
@@ -303,10 +315,10 @@ impl<'a> Parser<'a> {
             self.advance()?;
 
             return Ok(Prototype {
-                name:  id,
-                args:  vec![],
+                name: id,
+                args: vec![],
                 is_op: is_operator,
-                prec:  precedence,
+                prec: precedence,
             });
         }
 
@@ -315,25 +327,29 @@ impl<'a> Parser<'a> {
         loop {
             match self.current()? {
                 Token::Ident(name) => args.push(name),
-                _ => return Err(self.log_err(PE::Syntax, "Expected identifier in parameter declaration.")),
+                _ => {
+                    return Err(
+                        self.log_err(PE::Syntax, "Expected identifier in parameter declaration.")
+                    );
+                }
             }
 
             self.advance()?;
 
             match self.current()? {
                 Token::RParen => {
-                    let _ = self.advance();
+                    drop(self.advance());
                     break;
-                },
+                }
                 Token::Comma => {
-                    let _ = self.advance();
-                },
+                    drop(self.advance());
+                }
                 _ => {
                     return Err(self.log_err(
                         PE::Syntax,
                         "Expected ',' or ')' character in prototype declaration.",
                     ));
-                },
+                }
             }
         }
 
@@ -384,19 +400,20 @@ impl<'a> Parser<'a> {
     pub fn parse_toplevel_expr(&mut self) -> io::Result<Function> {
         match self.parse_expr() {
             Ok(value) => Ok(Function {
-                proto:   Prototype {
-                    name:  FUNC_NAME.to_string(),
-                    args:  vec![],
-                    prec:  0,
+                proto: Prototype {
+                    name: FUNC_NAME.to_owned(),
+                    args: vec![],
+                    prec: 0,
                     is_op: false,
                 },
-                body:    Some(value),
+                body: Some(value),
                 is_anon: true,
             }),
             Err(value) => Err(value),
         }
     }
 
+    #[expect(clippy::unused_self)]
     fn log_err(&self, kind: PE, error: &str) -> io::Error {
         let kind = match kind {
             PE::Syntax => io::ErrorKind::InvalidData,

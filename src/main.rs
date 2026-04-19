@@ -56,6 +56,7 @@ struct Args {
 
 /// Entry point of the program; acts as a REPL.
 fn main() -> io::Result<()> {
+    color_eyre::install()?;
     // let Args {
     //     display_lexer_output,
     //     display_parser_output,
@@ -148,7 +149,14 @@ fn main() -> io::Result<()> {
             continue;
         }
 
-        let precendence = [('=', 2), ('<', 10), ('+', 20), ('-', 20), ('*', 40), ('/', 40)];
+        let precendence = [
+            ('=', 2),
+            ('<', 10),
+            ('+', 20),
+            ('-', 20),
+            ('*', 40),
+            ('/', 40),
+        ];
         let mut prec = HashMap::from_iter(precendence);
         let mut parser = Parser::new(&input, &mut prec);
 
@@ -156,7 +164,7 @@ fn main() -> io::Result<()> {
             Token::EOF => break Ok(()),
             Token::Op(';') => {
                 parser.advance()?;
-            },
+            }
             Token::Def => handle_definition(&mut parser),
             Token::Extern => handle_extern(&mut parser),
             _ => handle_toplevel_expr(&mut parser),
@@ -174,7 +182,7 @@ fn handle_definition(parser: &mut Parser) {
     match parser.parse_definition() {
         Ok(func) => {
             eprintln!("Parsed a function definition: {}", func.proto.name);
-        },
+        }
         Err(e) => eprintln!("Error in definition: {:?}", e),
     }
 }
@@ -190,7 +198,7 @@ fn handle_toplevel_expr(parser: &mut Parser) {
     match parser.parse_toplevel_expr() {
         Ok(func) => {
             eprintln!("Parsed a top-level expr");
-        },
+        }
         Err(e) => eprintln!("Error: {:?}", e),
     }
 }

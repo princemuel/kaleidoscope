@@ -7,13 +7,14 @@ use std::io;
 use crate::token::Token;
 
 pub struct Lexer<'a> {
-    pos:   usize,
+    pos: usize,
     input: &'a str,
     chars: Box<Peekable<Chars<'a>>>,
 }
 
 impl<'a> Lexer<'a> {
     /// Creates a new `Lexer`,
+    #[must_use]
     pub fn new(input: &'a str) -> Self {
         Self {
             input,
@@ -28,9 +29,8 @@ impl<'a> Lexer<'a> {
         let start = self.pos;
 
         // Check for end of file. Don't eat the EOF.
-        let &ch = match self.chars.peek() {
-            Some(c) => c,
-            None => return Ok(Token::EOF),
+        let Some(&ch) = self.chars.peek() else {
+            return Ok(Token::EOF);
         };
 
         self.advance();
@@ -97,7 +97,7 @@ impl<'a> Lexer<'a> {
             "def" => Token::Def,
             "extern" => Token::Extern,
             "binary" => Token::Binary,
-            ident => Token::Ident(ident.to_string()),
+            ident => Token::Ident(ident.to_owned()),
         }
     }
 }
