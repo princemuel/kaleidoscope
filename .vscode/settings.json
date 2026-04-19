@@ -1,14 +1,32 @@
 {
+  "editor.formatOnSave": true,
+  "editor.formatOnSaveMode": "file",
+  "editor.tabSize": 2,
   "editor.wordWrap": "bounded",
   "editor.wordWrapColumn": 120,
-  "editor.formatOnSave": true,
+  "editor.inlineSuggest.enabled": true,
   "editor.bracketPairColorization.independentColorPoolPerBracketType": true,
   "editor.codeActionsOnSave": {
+    "source.addMissingImports": "explicit",
     "source.fixAll": "explicit",
     "source.organizeImports": "explicit",
-    "source.addMissingImports": "explicit"
+    "source.sortImports": "explicit",
+    "source.removeUnusedImports": "explicit"
+  },
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.quickSuggestions": { "strings": "on" },
+  "dotenv.enableAutocloaking": false,
+  "json.validate.enable": true,
+  "material-icon-theme.activeIconPack": "react_redux",
+  "material-icon-theme.folders.associations": {
+    "network": "app"
+  },
+  "markdown.validate.enabled": true,
+  "[shellscript]": {
+    "editor.defaultFormatter": "mads-hartmann.bash-ide-vscode"
   },
   // Rust Analyzer settings
+  "rust-analyzer.rustc.source": "discover",
   "rust-analyzer.assist.preferSelf": true,
   "rust-analyzer.assist.emitMustUse": true,
   // Cargo
@@ -29,6 +47,8 @@
   // Inlay Hints
   "rust-analyzer.inlayHints.typeHints.enable": false,
   "rust-analyzer.inlayHints.chainingHints.enable": false,
+  "rust-analyzer.inlayHints.parameterHints.enable": false,
+
   // Formatting with rustfmt
   "rust-analyzer.rustfmt.extraArgs": ["+nightly"],
   "[rust]": {
@@ -36,9 +56,14 @@
     "editor.formatOnSave": true
   },
   "rust-analyzer.testExplorer": true,
+  "rust-analyzer.semanticHighlighting.doc.comment.inject.enable": true,
   "rust-analyzer.semanticHighlighting.punctuation.enable": true,
-  "markdown.validate.enabled": true,
+  "rust-analyzer.semanticHighlighting.punctuation.specialization.enable": true,
   "workbench.editor.customLabels.patterns": {
     "**/mod.rs": "${dirname}.rs"
+  },
+
+  "[just]": {
+    "editor.defaultFormatter": "nefrob.vscode-just-syntax"
   }
 }

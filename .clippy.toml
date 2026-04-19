@@ -1,0 +1,12 @@
+# Project configuration for Clippy Rust code linter.
+# See full lints list at:
+# https://rust-lang.github.io/rust-clippy/master/index.html
+
+# Minimum Supported Rust Version (conservative for WASM tooling)
+msrv                                  = "1.90"
+absolute-paths-max-segments           = 3
+allow-expect-in-tests                 = true
+allow-panic-in-tests                  = true
+allow-print-in-tests                  = true
+allow-unwrap-in-tests                 = true
+module-items-ordered-within-groupings = "all"
