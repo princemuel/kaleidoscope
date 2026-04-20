@@ -10,7 +10,7 @@ The main tutorial shows how to implement a simple language using LLVM components
 
 ## Examples
 
-```ks
+```ruby
 # Compute the nth fibonacci number.
 def fib(n)
   if n < 3 then
@@ -22,7 +22,7 @@ def fib(n)
 fib(40)
 ```
 
-```ks
+```ruby
 extern sin(arg);
 extern cos(arg);
 extern atan2(arg1 arg2);
