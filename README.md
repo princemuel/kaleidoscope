@@ -11,12 +11,12 @@ The main tutorial shows how to implement a simple language using LLVM components
 ## Examples
 
 ```ks
-# Compute the x'th fibonacci number.
-def fib(x)
-  if x < 3 then
+# Compute the n'th fibonacci number.
+def fib(n)
+  if n < 3 then
     1
   else
-    fib(x-1)+fib(x-2)
+    fib(n-1)+fib(n-2)
 
 # This expression will compute the 40th number.
 fib(40)
