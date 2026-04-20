@@ -1,6 +1,6 @@
 //! The Kaleidoscope Abstract Syntax Tree (aka Parse Tree)
 
-/// `ExprAST` - Base for all expression nodes.
+/// Defines a primitive expression.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Expr {
@@ -17,18 +17,16 @@ pub enum Expr {
     Variable(String),
 }
 
-/// `PrototypeAST` - This represents the "prototype" for a function,
-/// which captures its name, and its argument names (thus implicitly the number
-/// of arguments the function takes).
+/// Defines the prototype (name and parameters) of a function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prototype {
     pub name: String,
     pub args: Vec<String>,
-    pub prec: usize,
+    pub prec: i32,
     pub is_op: bool,
 }
 
-/// `FunctionAST` - This represents a function definition itself.
+/// Defines a user-defined or external function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub proto: Prototype,

@@ -2,14 +2,15 @@
 
 use core::iter::Peekable;
 use core::str::Chars;
-use std::io;
 
 use crate::token::Token;
 
+/// Defines a lexer which transforms an input `String` into
+/// a `Token` stream.
 pub struct Lexer<'a> {
-    pos: usize,
     input: &'a str,
     chars: Box<Peekable<Chars<'a>>>,
+    pos: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -23,7 +24,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn token(&mut self) -> io::Result<Token> {
+    pub fn token(&mut self) -> LexResult<Token> {
         self.skip_whitespace();
 
         let start = self.pos;
@@ -114,3 +115,27 @@ impl Iterator for Lexer<'_> {
         }
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum LexError {
+    #[error("unexpected character {ch:?} at position {pos}")]
+    UnexpectedChar { ch: char, pos: usize },
+
+    #[error("unterminated comment starting at position {pos}")]
+    UnterminatedComment { pos: usize },
+
+    #[error("unterminated string literal starting at position {pos}")]
+    UnterminatedString { pos: usize },
+
+    #[error("invalid number literal: {literal:?} at position {pos} — {source}")]
+    InvalidNumber {
+        literal: String,
+        pos: usize,
+        source: core::num::ParseFloatError,
+    },
+    // #[error("unexpected end of input at position {pos}")]
+    // UnexpectedEof { pos: usize },
+}
+
+/// Defines the result of a lexing operation
+pub type LexResult<T> = Result<T, LexError>;

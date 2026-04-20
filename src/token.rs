@@ -13,5 +13,6 @@ pub enum Token {
     Number(f64),
     Op(char),
     RParen,
+    Unary,
     // ! remeber to update `Lexer:lex_ident`
 }
