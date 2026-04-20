@@ -2,13 +2,15 @@
 
 Kaleidoscope is a procedural language that allows you to define functions, use conditionals, math, etc.
 
-This project is the reference implementation of “Kaleidoscope” Language tutorial ported to Rust.
+This project is the reference implementation of [The “Kaleidoscope” Language tutorial][kaleidoscope] ported to Rust.
 
 The main tutorial shows how to implement a simple language using LLVM components in C++.
 
+[kaleidoscope]: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl01.html#the-kaleidoscope-language
+
 ## Examples
 
-```ruby
+```ks
 # Compute the x'th fibonacci number.
 def fib(x)
   if x < 3 then
@@ -20,7 +22,7 @@ def fib(x)
 fib(40)
 ```
 
-```ruby
+```ks
 extern sin(arg);
 extern cos(arg);
 extern atan2(arg1 arg2);
