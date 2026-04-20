@@ -11,7 +11,7 @@ The main tutorial shows how to implement a simple language using LLVM components
 ## Examples
 
 ```ks
-# Compute the n'th fibonacci number.
+# Compute the nth fibonacci number.
 def fib(n)
   if n < 3 then
     1
