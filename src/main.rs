@@ -1,4 +1,6 @@
-#![allow(unused)]
+#![expect(clippy::print_stdout)]
+#![expect(unused)]
+#![expect(unsafe_code)]
 use std::collections::HashMap;
 use std::io;
 
@@ -17,13 +19,19 @@ macro_rules! print_flush {
         use std::io::Write as _;
         print!( $($x, )* );
 
-        std::io::stdout().flush().expect("Could not flush to standard output.");
+        std::io::stdout().flush().expect("Could not flush to stdout");
     };
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn putchard(x: f64) -> f64 {
-    print_flush!("{}", x as u8 as char);
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let c: char = (x.round() as u8).into();
+    print_flush!("{c}");
     x
 }
 
@@ -37,6 +45,15 @@ pub extern "C" fn printd(x: f64) -> f64 {
 // so Rust compiler won't remove them.
 #[used]
 static EXTERNAL_FNS: [extern "C" fn(f64) -> f64; 2] = [putchard, printd];
+
+const PRECENDENCE_OPS: [(char, u8); 6] = [
+    ('=', 2),
+    ('<', 10),
+    ('+', 20),
+    ('-', 20),
+    ('*', 40),
+    ('/', 40),
+];
 
 #[derive(Debug, clap::Parser)]
 #[command(author, version, about, long_about = None)]
@@ -55,110 +72,24 @@ struct Args {
 }
 
 /// Entry point of the program; acts as a REPL.
-fn main() -> io::Result<()> {
-    color_eyre::install()?;
-    // let Args {
-    //     display_lexer_output,
-    //     display_parser_output,
-    //     display_compiler_output,
-    //     eval,
-    //     ..
-    // } = Args::parse();
-
-    // let mut compute = |input: String| {
-    //     let precendence = [('=', 2), ('<', 10), ('+', 20), ('-', 20), ('*', 40),
-    // ('/', 40)];     let mut prec = HashMap::from_iter(precendence);
-
-    //     // Parse and (optionally) display input
-    //     if display_lexer_output {
-    //         println!(
-    //             "-> Attempting to parse lexed input: \n{:?}\n",
-    //             Lexer::new(&input).collect::<Vec<Token>>()
-    //         );
-    //     }
-
-    //     let (function, is_anonymous) = match Parser::new(input, &mut
-    // prec).parse() {         Ok(func) => {
-    //             let is_anon = func.is_anon;
-
-    //             if display_parser_output {
-    //                 if is_anon {
-    //                     println!("-> Expression parsed: \n{:?}\n", func.body);
-    //                 } else {
-    //                     println!("-> Function parsed: \n{func:?}\n");
-    //                 }
-    //             }
-
-    //             (function, is_anon)
-    //         },
-    //         Err(err) => {
-    //             println!("!> Error parsing expression: {err}");
-    //             return;
-    //         },
-    //     };
-
-    //     if display_compiler_output {
-    //         println!("-> Expression compiled to IR:");
-    //         function.print_to_stderr();
-    //     }
-    // };
-    // let stdin = std::io::stdin();
-    // let lexer = Lexer::new(stdin.lock().into());
-    // let mut parser = Parser::new(lexer)?;
-
-    // // Prime the first token.
-    // eprint!("ready> ");
-    // parser.get_next_token()?;
-
-    // // Run the main "interpreter loop" now.
-    // run_main_loop();
-    // if let Some(input) = eval {
-    //     compute(format!("{input}\n"));
-    // } else {
-    //     loop {
-    //         println!();
-    //         print_flush!("?> ");
-
-    //         let mut buffer = String::new();
-    //         io::stdin()
-    //             .read_line(&mut buffer)
-    //             .expect("Could not read from standard input.");
-
-    //         if buffer.starts_with("exit") || buffer.starts_with("quit") {
-    //             break;
-    //         } else if buffer.chars().all(char::is_whitespace) {
-    //             continue;
-    //         }
-
-    //         compute(buffer);
-    //     }
-    // }
-
+fn main() -> Result<(), Box<dyn core::error::Error>> {
     loop {
         println!();
-        print_flush!("?> ");
+        print_flush!("ready> ");
 
-        let mut input = String::new();
-        io::stdin()
-            .read_line(&mut input)
-            .expect("Could not read from standard input.");
+        let mut buffer = String::new();
+        io::stdin().read_line(&mut buffer)?;
 
-        if input.starts_with("exit") || input.starts_with("quit") {
+        #[expect(clippy::else_if_without_else)]
+        if buffer.starts_with("exit") || buffer.starts_with("quit") {
             break Ok(());
-        } else if input.chars().all(char::is_whitespace) {
+        } else if buffer.chars().all(char::is_whitespace) {
             continue;
         }
 
-        let precendence = [
-            ('=', 2),
-            ('<', 10),
-            ('+', 20),
-            ('-', 20),
-            ('*', 40),
-            ('/', 40),
-        ];
-        let mut prec = HashMap::from_iter(precendence);
-        let mut parser = Parser::new(&input, &mut prec);
+        let mut prec = PRECENDENCE_OPS.into();
+        let tokens = Lexer::new(&buffer).collect::<Result<Vec<_>, _>>()?;
+        let mut parser = Parser::new(&tokens, &mut prec);
 
         match parser.current()? {
             Token::EOF => break Ok(()),
@@ -178,27 +109,27 @@ fn main() -> io::Result<()> {
 
 use std::io::Write as _;
 
-fn handle_definition(parser: &mut Parser) {
+fn handle_definition(parser: &mut Parser<'_>) {
     match parser.parse_definition() {
         Ok(func) => {
             eprintln!("Parsed a function definition: {}", func.proto.name);
         }
-        Err(e) => eprintln!("Error in definition: {:?}", e),
+        Err(e) => eprintln!("Error in definition: {e:?}"),
     }
 }
 
-fn handle_extern(parser: &mut Parser) {
+fn handle_extern(parser: &mut Parser<'_>) {
     match parser.parse_extern() {
         Ok(proto) => eprintln!("Parsed an extern: {}", proto.proto.name),
-        Err(e) => eprintln!("Error parsing extern: {:?}", e),
+        Err(e) => eprintln!("Error parsing extern: {e:?}"),
     }
 }
 
-fn handle_toplevel_expr(parser: &mut Parser) {
+fn handle_toplevel_expr(parser: &mut Parser<'_>) {
     match parser.parse_toplevel_expr() {
         Ok(func) => {
             eprintln!("Parsed a top-level expr");
         }
-        Err(e) => eprintln!("Error: {:?}", e),
+        Err(e) => eprintln!("Error: {e:?}"),
     }
 }

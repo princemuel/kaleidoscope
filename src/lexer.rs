@@ -24,7 +24,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn token(&mut self) -> LexResult<Token> {
+    /// Returns the next token from standard input.
+    pub fn get_token(&mut self) -> LexResult<Token> {
         self.skip_whitespace();
 
         let start = self.pos;
@@ -41,7 +42,7 @@ impl<'a> Lexer<'a> {
             ')' => Token::RParen,
             ',' => Token::Comma,
             '#' => self.lex_comment(),
-            '.' | '0'..='9' => self.lex_number(start),
+            '.' | '0'..='9' => self.lex_number(start)?,
             'a'..='z' | 'A'..='Z' | '_' => self.lex_ident(start),
             op => Token::Op(op),
         };
@@ -71,10 +72,11 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+
         Token::Comment
     }
 
-    fn lex_number(&mut self, start: usize) -> Token {
+    fn lex_number(&mut self, start: usize) -> LexResult<Token> {
         while let Some(&ch) = self.chars.peek() {
             if ch != '.' && !ch.is_ascii_hexdigit() {
                 break;
@@ -83,7 +85,12 @@ impl<'a> Lexer<'a> {
         }
 
         let slice = &self.input[start..self.pos];
-        Token::Number(slice.parse().unwrap_or_default())
+        let result = slice.parse().map_err(|source| LexError::InvalidNumber {
+            literal: slice.to_owned(),
+            pos: start,
+            source,
+        })?;
+        Ok(Token::Number(result))
     }
 
     fn lex_ident(&mut self, start: usize) -> Token {
@@ -104,14 +111,13 @@ impl<'a> Lexer<'a> {
 }
 
 impl Iterator for Lexer<'_> {
-    type Item = Token;
+    type Item = LexResult<Token>;
 
-    /// Lexes the next `Token` and returns it. `None` is returned on EOF or
-    /// failure
     fn next(&mut self) -> Option<Self::Item> {
-        match self.token() {
-            Ok(Token::EOF) | Err(_) => None,
-            Ok(value) => Some(value),
+        match self.get_token() {
+            Ok(Token::EOF) => None,
+            Ok(token) => Some(Ok(token)),
+            Err(e) => Some(Err(e)),
         }
     }
 }

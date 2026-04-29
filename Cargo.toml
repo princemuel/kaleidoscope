@@ -7,6 +7,8 @@ edition = "2024"
 clap       = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 inkwell    = { version = "0.9", features = ["llvm22-1"] }
+itertools = "0.14.0"
+llvm-sys = "221.0.1"
 thiserror  = "2"
 
 [features]

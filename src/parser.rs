@@ -3,26 +3,23 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr, Function, Prototype};
-use crate::lexer::{LexError, Lexer};
+use crate::lexer::LexError;
 use crate::token::Token;
 
-const ANON_FUNC_NAME: &str = "anonymous";
+const ANONYMOUS_FUNCTION: &str = "__anon_expr";
 
 pub struct Parser<'a> {
-    tokens: Vec<Token>,
+    tokens: &'a [Token],
     /// The current position of the token the parser is looking at.
     pos: usize,
     /// Holds the precedence for each binary operator.
-    prec: &'a mut HashMap<char, i32>,
+    prec: &'a mut HashMap<char, u8>,
 }
 
 impl<'a> Parser<'a> {
-    /// Creates a new parser, given an input [`str`] and a [`HashMap`] binding
-    /// an operator and its precedence in binary expressions.
-    pub fn new(input: &str, prec: &'a mut HashMap<char, i32>) -> Self {
-        let mut lexer = Lexer::new(input);
-        let tokens = lexer.by_ref().collect();
-
+    /// Creates a new parser, given an tokens slice [`Token`] and a [`HashMap`]
+    /// binding an operator and its precedence in binary expressions.
+    pub fn new(tokens: &'a [Token], prec: &'a mut HashMap<char, u8>) -> Self {
         Self {
             tokens,
             prec,
@@ -73,16 +70,16 @@ impl<'a> Parser<'a> {
     #[must_use]
     pub const fn is_eof(&self) -> bool { self.pos >= self.tokens.len() }
 
-    /// Returns the precedence of the current `Token`, or `-1` if it is not
+    /// Returns the precedence of the current `Token`, or `None` if it is not
     /// a known binary operator.
-    /// TODO: make sure it the original actually returns -1
     #[must_use]
-    pub fn tok_precedence(&self) -> i32 {
-        if let Ok(Token::Op(op)) = self.current() {
-            self.prec.get(&op).copied().unwrap_or(-1)
-        } else {
-            -1
-        }
+    pub fn tok_precedence(&self) -> Option<u8> {
+        let Token::Op(op) = self.current().ok()? else {
+            return None;
+        };
+
+        let prec = self.prec.get(&op).copied()?;
+        (prec > 0).then_some(prec)
     }
 
     /// Parses any expression.
@@ -98,12 +95,12 @@ impl<'a> Parser<'a> {
     /// numberexpr ::= number
     pub fn parse_num_expr(&mut self) -> ParseResult<Expr> {
         let token = self.current()?;
-        let Token::Number(value) = token else {
+        let Token::Number(result) = token else {
             return Err(ParseError::ExpectedNumber(token));
         };
 
         self.advance().ok();
-        Ok(Expr::Number(value))
+        Ok(Expr::Number(result))
     }
 
     /// Parses an expression enclosed in parentheses.
@@ -116,7 +113,7 @@ impl<'a> Parser<'a> {
         };
 
         self.advance()?;
-        let expr = self.parse_expr()?;
+        let result = self.parse_expr()?;
 
         let token = self.current()?;
         let Token::RParen = token else {
@@ -124,7 +121,7 @@ impl<'a> Parser<'a> {
         };
 
         self.advance().ok();
-        Ok(expr)
+        Ok(result)
     }
 
     /// Parses an expression that starts with an identifier (either a variable
@@ -133,9 +130,9 @@ impl<'a> Parser<'a> {
     /// identifierexpr ::= identifier
     ///                  | identifier '(' expression* ')'
     pub fn parse_ident_expr(&mut self) -> ParseResult<Expr> {
-        let ident = match self.current()? {
-            Token::Ident(id) => id,
-            token => return Err(ParseError::ExpectedIdent(token)),
+        let token = self.current()?;
+        let Token::Ident(ident) = token else {
+            return Err(ParseError::ExpectedIdent(token));
         };
 
         // Not a call — either EOF or a non-'(' token follows.
@@ -192,13 +189,12 @@ impl<'a> Parser<'a> {
     /// Parses a binary expression given its left-hand side.
     ///
     /// binoprhs ::= (op unary)*
-    pub fn parse_bin_expr(&mut self, prec: i32, mut lhs: Expr) -> ParseResult<Expr> {
+    pub fn parse_bin_expr(&mut self, prec: u8, mut lhs: Expr) -> ParseResult<Expr> {
         loop {
-            let curr_prec = self.tok_precedence();
-
-            if curr_prec < prec || self.is_eof() {
-                return Ok(lhs);
-            }
+            let tok_prec = match self.tok_precedence() {
+                Some(p) if p >= prec => p,
+                _ => return Ok(lhs),
+            };
 
             let token = self.current()?;
             let Token::Op(op) = token else {
@@ -207,13 +203,12 @@ impl<'a> Parser<'a> {
 
             self.advance()?;
 
-            let rhs = self.parse_unary_expr()?;
-
-            let rhs = if curr_prec < self.tok_precedence() {
-                self.parse_bin_expr(curr_prec + 1, rhs)?
-            } else {
-                rhs
-            };
+            let mut rhs = self.parse_unary_expr()?;
+            if let Some(next_prec) = self.tok_precedence()
+                && tok_prec < next_prec
+            {
+                rhs = self.parse_bin_expr(tok_prec + 1, rhs)?;
+            }
 
             lhs = Expr::Binary {
                 op,
@@ -246,10 +241,14 @@ impl<'a> Parser<'a> {
                 self.advance()?;
 
                 // * manual check for safe `as` conversion from double (f64) value
-                #[expect(clippy::as_conversions, clippy::cast_possible_truncation)]
-                let prec = if let Token::Number(n) = self.current()? {
+                #[expect(
+                    clippy::as_conversions,
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss
+                )]
+                let prec = if let Ok(Token::Number(n)) = self.current() {
                     self.advance()?;
-                    if n.is_finite() { n as i32 } else { 0 }
+                    if n.is_finite() { n as u8 } else { 0 }
                 } else {
                     0
                 };
@@ -311,7 +310,8 @@ impl<'a> Parser<'a> {
     ///
     /// definition ::= 'def' prototype expression
     pub fn parse_definition(&mut self) -> ParseResult<Function> {
-        self.pos += 1; // eat 'def'
+        self.advance().ok(); // eat 'def'
+
         let proto = self.parse_prototype()?;
         let body = self.parse_expr()?;
 
@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
     ///
     /// external ::= 'extern' prototype
     pub fn parse_extern(&mut self) -> ParseResult<Function> {
-        self.pos += 1; // eat 'extern'
+        self.advance().ok(); // eat 'extern'
         let proto = self.parse_prototype()?;
 
         Ok(Function {
@@ -343,7 +343,7 @@ impl<'a> Parser<'a> {
         let expr = self.parse_expr()?;
         Ok(Function {
             proto: Prototype {
-                name: ANON_FUNC_NAME.to_owned(),
+                name: ANONYMOUS_FUNCTION.to_owned(),
                 args: vec![],
                 prec: 0,
                 is_op: false,
