@@ -1,3 +1,5 @@
+#:schema https://www.schemastore.org/rust-toolchain.json
+
 [toolchain]
-  channel = "nightly"
-  profile = "default"
+channel = "nightly"
+profile = "default"
