@@ -25,7 +25,10 @@ impl<'a> Parser<'a> {
     /// Parses any expression.
     ///
     /// expression ::= primary binoprhs
-    pub fn parse_expr(&mut self) -> Result<Expr, ParseError> { unimplemented!() }
+    pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.parse_unary_expr()?;
+        self.parse_bin_expr(0, lhs)
+    }
 
     /// Parses a literal number.
     ///
@@ -110,6 +113,50 @@ impl<'a> Parser<'a> {
             TokenKind::Number(_) => self.parse_num_expr(),
             TokenKind::LParen => self.parse_paren_expr(),
             token => Err(ParseError::ExpectedExpr(token.to_string())),
+        }
+    }
+
+    /// Parses a unary expression.
+    ///
+    /// unary ::= op unary | primary
+    pub fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
+        if let TokenKind::Op(op) = self.current()? {
+            self.advance()?;
+
+            return Ok(Expr::Call {
+                name: format!("unary{op}"),
+                args: vec![self.parse_unary_expr()?],
+            });
+        }
+
+        self.parse_primary()
+    }
+
+    /// Parses a binary expression given its left-hand side.
+    ///
+    /// binoprhs ::= (op unary)*
+    pub fn parse_bin_expr(&mut self, prec: u8, mut lhs: Expr) -> Result<Expr, ParseError> {
+        loop {
+            let tok_prec = match self.tok_precedence() {
+                Some(p) if p >= prec => p,
+                _ => return Ok(lhs),
+            };
+
+            let token = self.current()?;
+            let TokenKind::Op(op) = token else {
+                return Err(ParseError::InvalidOperator(token.to_string()));
+            };
+
+            self.advance()?;
+
+            let mut rhs = self.parse_unary_expr()?;
+            if let Some(next_prec) = self.tok_precedence()
+                && tok_prec < next_prec
+            {
+                rhs = self.parse_bin_expr(tok_prec + 1, rhs)?;
+            }
+
+            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
     }
 }
