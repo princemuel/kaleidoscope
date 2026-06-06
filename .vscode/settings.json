@@ -17,10 +17,6 @@
   "editor.quickSuggestions": { "strings": "on" },
   "dotenv.enableAutocloaking": false,
   "json.validate.enable": true,
-  "material-icon-theme.activeIconPack": "react_redux",
-  "material-icon-theme.folders.associations": {
-    "network": "app"
-  },
   "markdown.validate.enabled": true,
   "[shellscript]": {
     "editor.defaultFormatter": "mads-hartmann.bash-ide-vscode"
