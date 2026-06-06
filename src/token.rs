@@ -1,16 +1,26 @@
+/// A fully classified token together with its source span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Token<'a> {
+    pub kind: TokenKind<'a>,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenKind<'a> {
-    // Eof, // do i really need this???
     Comma,
     Comment,
-    // commands
+
+    // Keywords
     Def,
     Extern,
-    // primary
+
+    // Literals / identifiers
     Ident(&'a str),
     Number(f64),
-    // unknown
+
+    // Operators
     Op(char),
+    Invalid(&'a str),
 }
 
 /// A byte-range into the original source string.
@@ -20,14 +30,15 @@ pub struct Span {
     pub end: usize,
 }
 
-impl Span {
-    #[must_use]
-    pub fn slice<'a>(&self, src: &'a str) -> &'a str { &src[self.start..self.end] }
-}
+// #[derive(Clone, Debug, PartialEq)]
+// pub struct Diagnostic<'a> {
+//     pub message: &'a str,
+//     pub span: Span,
+//     pub severity: Severity,
+// }
 
-/// A fully classified token: its kind + where it lives in the source.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Token<'a> {
-    pub kind: TokenKind<'a>,
-    pub span: Span,
-}
+// #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pub enum Severity {
+//     Error,
+//     Warning,
+// }
