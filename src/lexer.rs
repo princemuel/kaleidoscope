@@ -14,27 +14,27 @@ impl<'a> Lexer<'a> {
     #[must_use]
     pub const fn new(source: &'a str) -> Self { Self { source, cursor: 0 } }
 
+    /// Returns the next token from stdin.
     fn lex_next(&mut self) -> Option<Token<'a>> {
         // skip whitespace
         self.advance_while(|b| b.is_ascii_whitespace());
 
-        if self.is_eof() {
-            return None;
-        }
-
         let start = self.cursor;
 
-        let token = match self.peek()? {
+        let ch = self.peek()?;
+        self.advance(); // consume token
+
+        let token = match ch {
             b'#' => {
-                self.advance(); //#
                 self.advance_while(|b| b != b'\n' && b != b'\r');
                 self.simple(TokenKind::Comment, start)
             }
 
-            b',' => {
-                self.advance();
-                self.simple(TokenKind::Comma, start)
-            }
+            b',' => self.simple(TokenKind::Comma, start),
+
+            b'(' => self.simple(TokenKind::LParen, start),
+
+            b')' => self.simple(TokenKind::RParen, start),
 
             b if b.is_ascii_alphabetic() || b == b'_' => {
                 self.advance_while(|b| b.is_ascii_alphanumeric() || b == b'_');
@@ -43,13 +43,21 @@ impl<'a> Lexer<'a> {
                 let kind = match lexeme {
                     "def" => TokenKind::Def,
                     "extern" => TokenKind::Extern,
+                    "if" => TokenKind::If,
+                    "then" => TokenKind::Then,
+                    "else" => TokenKind::Else,
+                    "for" => TokenKind::For,
+                    "in" => TokenKind::In,
+                    "unary" => TokenKind::Unary,
+                    "binary" => TokenKind::Binary,
+                    "var" => TokenKind::Var,
                     _ => TokenKind::Ident(lexeme),
                 };
 
                 self.simple(kind, start)
             }
 
-            b if b.is_ascii_digit() => {
+            b if b.is_ascii_digit() || b == b'.' => {
                 self.advance_while(|b| b.is_ascii_digit());
 
                 if self.peek() == Some(b'.')
@@ -69,11 +77,19 @@ impl<'a> Lexer<'a> {
 
                 self.simple(kind, start)
             }
+            // b if b.is_ascii_digit() || b == b'.' => {
+            //     self.advance_while(|b| b.is_ascii_digit() || b == b'.');
 
-            b => {
-                self.advance();
-                self.simple(TokenKind::Op(char::from(b)), start)
-            }
+            //     let lexeme = self.slice(start);
+
+            //     let kind = match Number::parse(lexeme) {
+            //         Some(n) => TokenKind::Number(n),
+            //         None => TokenKind::Invalid(lexeme),
+            //     };
+
+            //     self.simple(kind, start)
+            // }
+            b => self.simple(TokenKind::Op(char::from(b)), start),
         };
 
         Some(token)
@@ -94,11 +110,7 @@ impl<'a> Lexer<'a> {
     fn advance(&mut self) { self.cursor += 1; }
 
     fn advance_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
-        while let Some(b) = self.peek() {
-            if !predicate(b) {
-                break;
-            }
-
+        while self.peek().is_some_and(&mut predicate) {
             self.advance();
         }
     }
@@ -117,3 +129,39 @@ impl<'a> Iterator for Lexer<'a> {
 }
 
 impl FusedIterator for Lexer<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lex() {
+        //         let source = "
+        //         # Compute the x'th fibonacci number.
+        // def fib(x)
+        //   if x < 3 then
+        //     1
+        //   else
+        //     fib(x - 1) + fib(x - 2)
+        // ";
+        //         let lexer = Lexer::new(source);
+
+        //         for Token { kind, .. } in lexer {
+        //             println!("{kind:?}");
+        //         }
+
+        //         println!("\n\n");
+
+        let source = "extern sin(arg);
+extern cos(arg);
+extern atan2(arg1 arg2);
+
+atan2(sin(.4), cos(42))
+";
+        let lexer = Lexer::new(source);
+
+        for Token { kind, .. } in lexer {
+            println!("{kind:?}");
+        }
+    }
+}

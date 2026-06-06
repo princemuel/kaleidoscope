@@ -36,16 +36,27 @@ pub enum TokenKind<'a> {
     // Keywords
     Def,
     Extern,
+    Else,
+    For,
+    If,
+    In,
+    Then,
+    Var,
 
     // Literals / identifiers
     Ident(&'a str),
     Number(Number),
-
-    // Operators
-    Op(char),
-    Invalid(&'a str),
     // Named constants: π, etc.
     // Constant(&'a str, f64),
+
+    // Operators
+    Binary,
+    LParen,
+    RParen,
+    Op(char),
+    Unary,
+    // Invalid
+    Invalid(&'a str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,20 +80,30 @@ impl Number {
 impl fmt::Display for TokenKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            TokenKind::Number(v) => match v {
-                Number::Int(v) => write!(f, "{v}"),
-                Number::Float(v) => write!(f, "{v}"),
-            },
-            // TokenKind::Constant(name, _) => write!(f, "{name}"),
-            TokenKind::Op(v) => write!(f, "{v}"),
-            // TokenKind::Function(name) => write!(f, "{name}"),
-            TokenKind::Comma => write!(f, ","),
-            // TokenKind::LeftParen => write!(f, "("),
-            // TokenKind::RightParen => write!(f, ")"),
+            Self::Comma => write!(f, ","),
             Self::Comment => write!(f, "#"),
             Self::Def => write!(f, "def"),
             Self::Extern => write!(f, "extern"),
+            Self::Else => write!(f, "else"),
+            Self::For => write!(f, "for"),
+            Self::If => write!(f, "if"),
+            Self::In => write!(f, "in"),
+            Self::Then => write!(f, "then"),
+            Self::Var => write!(f, "var"),
+
             Self::Ident(v) | Self::Invalid(v) => write!(f, "{v}"),
+            Self::Number(v) => match v {
+                Number::Int(v) => write!(f, "{v}"),
+                Number::Float(v) => write!(f, "{v}"),
+            },
+            // Self::Constant(name, _) => write!(f, "{name}"),
+            // Self::Function(name) => write!(f, "{name}"),
+            Self::LParen => write!(f, "("),
+            Self::Op(v) => write!(f, "{v}"),
+            Self::RParen => write!(f, ")"),
+            // Self::Binary => todo!(),
+            // Self::Unary => todo!(),
+            _ => unimplemented!(),
         }
     }
 }
