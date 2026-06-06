@@ -1,9 +1,7 @@
-pub type Result<T> = core::result::Result<T, String>;
-
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("{0}")]
     Lexer(String),
-    Parse(String),
-    Codegen(String),
-    Jit(String),
-    Io(std::io::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
