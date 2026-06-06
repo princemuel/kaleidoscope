@@ -115,6 +115,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    #[expect(dead_code)]
     fn is_eof(&self) -> bool { self.cursor >= self.source.len() }
 
     fn span(&self, start: usize) -> Span { Span { start, end: self.cursor } }
