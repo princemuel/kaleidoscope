@@ -6,13 +6,13 @@ use crate::token::Number;
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Expr {
-    /// Defines a binary operator
+    /// defines a binary operator
     Binary { op: char, lhs: Box<Expr>, rhs: Box<Expr> },
-    /// Defines a function call
+    /// defines a function call
     Call { name: String, args: Vec<Expr> },
     /// defines numeric literals like `1.0` or 1.
     Number(Number),
-    /// Defines a variable, like `a`
+    /// defines a variable, like `a`
     Variable(String),
 }
 
