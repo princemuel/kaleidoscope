@@ -1,6 +1,6 @@
 use core::iter::FusedIterator;
 
-use crate::token::{Span, Token, TokenKind};
+use crate::token::{Number, Span, Token, TokenKind};
 
 /// Defines a lexer which transforms an input string into a token stream.
 #[derive(Clone, Debug)]
@@ -49,24 +49,22 @@ impl<'a> Lexer<'a> {
                 self.simple(kind, start)
             }
 
-            b if b.is_ascii_digit() || b == b'.' => {
-                let mut seen_dot = false;
+            b if b.is_ascii_digit() => {
+                self.advance_while(|b| b.is_ascii_digit());
 
-                while let Some(b) = self.peek() {
-                    match b {
-                        b'0'..=b'9' => self.advance(),
-                        b'.' if !seen_dot => {
-                            seen_dot = true;
-                            self.advance();
-                        }
-                        _ => break,
-                    }
+                if self.peek() == Some(b'.')
+                    && self.peek_ahead(1).is_some_and(|b| b.is_ascii_digit())
+                {
+                    self.advance(); // consume '.'
+
+                    self.advance_while(|b| b.is_ascii_digit());
                 }
 
                 let lexeme = self.slice(start);
-                let kind = match lexeme.parse() {
-                    Ok(n) => TokenKind::Number(n),
-                    Err(_) => TokenKind::Invalid(lexeme),
+
+                let kind = match Number::parse(lexeme) {
+                    Some(n) => TokenKind::Number(n),
+                    None => TokenKind::Invalid(lexeme),
                 };
 
                 self.simple(kind, start)
@@ -87,7 +85,11 @@ impl<'a> Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn peek(&self) -> Option<u8> { self.source.as_bytes().get(self.cursor).copied() }
+    fn peek(&self) -> Option<u8> { self.peek_ahead(0) }
+
+    fn peek_ahead(&self, n: usize) -> Option<u8> {
+        self.source.as_bytes().get(self.cursor + n).copied()
+    }
 
     fn advance(&mut self) { self.cursor += 1; }
 
