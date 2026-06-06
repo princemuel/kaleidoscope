@@ -1,12 +1,16 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenKind<'a> {
-    Eof,
+    // Eof, // do i really need this???
+    Comma,
+    Comment,
     // commands
     Def,
     Extern,
     // primary
     Ident(&'a str),
     Number(f64),
+    // unknown
+    Op(char),
 }
 
 /// A byte-range into the original source string.
@@ -23,7 +27,7 @@ impl Span {
 
 /// A fully classified token: its kind + where it lives in the source.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Token<'a> {
+pub struct Token<'a> {
     pub kind: TokenKind<'a>,
     pub span: Span,
 }
