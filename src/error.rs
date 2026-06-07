@@ -1,4 +1,4 @@
-use inkwell::error::Error as InkwellError;
+use inkwell::builder::BuilderError;
 use inkwell::support::LLVMString;
 use thiserror::Error as ThisError;
 
@@ -20,7 +20,7 @@ pub enum CodegenError {
     #[error("unknown variable: '{0}'")]
     UnknownVariable(String),
 
-    #[error("unknown function: '{0}'")]
+    #[error("unknown function referenced: '{0}'")]
     UnknownFunction(String),
 
     #[error("invalid binary operator: '{0}'")]
@@ -32,11 +32,14 @@ pub enum CodegenError {
     #[error("function '{0}' cannot be redefined")]
     FunctionRedefinition(String),
 
-    #[error("{0}")]
-    Inkwell(#[from] InkwellError),
+    #[error(transparent)]
+    Builder(#[from] BuilderError),
+
+    #[error(transparent)]
+    LLVMString(#[from] LLVMString),
 
     #[error("{0}")]
-    Llvm(#[from] LLVMString),
+    Unknown(String),
 }
 
 #[derive(Debug, ThisError)]

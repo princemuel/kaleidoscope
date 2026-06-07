@@ -3,6 +3,8 @@ use std::io;
 use std::io::prelude::*;
 
 use inkwell::context::Context;
+use inkwell::targets::{InitializationConfig, Target};
+use kaleidoscope::error::CodegenError;
 use kaleidoscope::token::TokenKind;
 use kaleidoscope::{Codegen, Error, Lexer, Parser};
 
@@ -21,9 +23,11 @@ macro_rules! prompt {
 
 fn main() -> Result<(), Error> {
     let prec = HashMap::from(PRECEDENCE_OPS);
-    let context = Context::create();
 
-    let mut _codegen = Codegen::new(&context);
+    // Target::initialize_all(&InitializationConfig::default());
+    Target::initialize_native(&InitializationConfig::default()).map_err(CodegenError::Unknown)?;
+    let context = Context::create();
+    let mut _codegen = Codegen::new("my cool jit", &context);
 
     let stdin = io::stdin();
     prompt!();
