@@ -1,68 +1,113 @@
+use std::collections::HashMap;
 use std::io;
+use std::io::prelude::*;
 
 use kaleidoscope::token::TokenKind;
 use kaleidoscope::{Error, Lexer, Parser};
 
-const PRECENDENCE_OPS: [(char, u8); 6] =
+/// Binary-operator precedence table.
+const PRECEDENCE_OPS: [(char, u8); 6] =
     [('=', 2), ('<', 10), ('+', 20), ('-', 20), ('*', 40), ('/', 40)];
 
-macro_rules! printf {
-    ( $( $x:expr ),* ) => {
-        use std::io::Write as _;
-        print!( $($x, )* );
-
-        std::io::stdout().flush().expect("Could not flush to stdout");
-    };
+/// Print a prompt and flush stderr immediately, matching C++'s `fprintf(stderr,
+/// "ready> ")`.
+macro_rules! prompt {
+    () => {{
+        eprint!("ready> ");
+        io::stderr().flush().expect("failed to flush stdout");
+    }};
 }
 
 fn main() -> Result<(), Error> {
-    loop {
-        println!();
-        printf!("ready> ");
+    let prec = HashMap::from(PRECEDENCE_OPS);
 
-        let mut buffer = String::new();
-        io::stdin().read_line(&mut buffer)?;
+    let stdin = io::stdin();
+    prompt!();
 
-        let prec = PRECENDENCE_OPS.into();
-        let tokens: Vec<_> = Lexer::new(&buffer).collect();
+    for line in stdin.lock().lines() {
+        let buffer = line?;
+
+        // Empty line = Ctrl+D (EOF) on most terminals.
+        if buffer.is_empty() {
+            break;
+        }
+
+        // Lex the entire line into a Vec<TokenKind> upfront.
+        // C++ lexes on-demand from stdin; we batch-lex one line at a time.
+        // The semantics are identical for single-line input; multi-line
+        // function bodies would require accumulation (future work).
+        let tokens: Vec<_> = Lexer::new(&buffer).tokens().collect();
+
+        // An empty token list (blank line or comment-only) — just re-prompt.
+        if tokens.is_empty() {
+            prompt!();
+            continue;
+        }
+
         let mut parser = Parser::new(&tokens, &prec);
 
-        // Keep dispatching until the token stream is exhausted
+        // Dispatch loop: consume the token slice left-to-right, matching
+        // C++ MainLoop()'s while(true) switch on CurTok.
         loop {
             match parser.current() {
-                Err(_) => break,                          // EOF
-                Ok(TokenKind::Eof) => break,
-                Ok(TokenKind::Op(';')) => { parser.advance().ok(); }
+                // Past the end of the token slice...be done with this line.
+                Err(_) => break,
+
+                // Semicolons are statement separators; skip silently.
+                Ok(TokenKind::Op(';')) => {
+                    parser.advance_unchecked();
+                }
+
                 Ok(TokenKind::Def) => handle_definition(&mut parser),
                 Ok(TokenKind::Extern) => handle_extern(&mut parser),
+
+                // Any other token: treat as a top-level expression.
                 _ => handle_toplevel_expr(&mut parser),
             }
         }
 
-        // Check if the very first token was EOF (user hit Ctrl+D)
-        if tokens.is_empty() || tokens[0] == TokenKind::Eof {
-            break Ok(());
+        // Print the prompt for the next line after finishing all dispatches.
+        // This matches C++: the prompt is printed at the *top* of MainLoop's
+        // while(true) body, i.e. before each new dispatch, which from the
+        // user's perspective means "after the previous output".
+        prompt!();
+    }
+
+    Ok(())
+}
+
+// On failure, the following functions skip one token for error recovery,
+// matching the C++ version
+
+/// Handle a `def` — parse a function definition and report success or failure.
+fn handle_definition(parser: &mut Parser<'_>) {
+    match parser.parse_definition() {
+        Ok(_) => eprintln!("Parsed a function definition."),
+        Err(e) => {
+            eprintln!("Error in definition: {e}");
+            parser.skip_for_recovery();
         }
     }
 }
 
-fn handle_definition(parser: &mut Parser<'_>) {
-    match parser.parse_definition() {
-        Ok(_) => eprintln!("Parsed a function definition."), // drop name
-        Err(e) => eprintln!("Error in definition: {e}"),
-    }
-}
-
+/// Handle an `extern` declaration.
 fn handle_extern(parser: &mut Parser<'_>) {
     match parser.parse_extern() {
-        Ok(_) => eprintln!("Parsed an extern"), // drop name
-        Err(e) => eprintln!("Error parsing extern: {e}"),
+        Ok(_) => eprintln!("Parsed an extern"),
+        Err(e) => {
+            eprintln!("Error parsing extern: {e}");
+            parser.skip_for_recovery();
+        }
     }
 }
 
+/// Handle a top-level expression.
 fn handle_toplevel_expr(parser: &mut Parser<'_>) {
     match parser.parse_toplevel_expr() {
         Ok(_) => eprintln!("Parsed a top-level expr"),
-        Err(e) => eprintln!("Error: {e}"),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            parser.skip_for_recovery();
+        }
     }
 }
