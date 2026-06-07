@@ -3,4 +3,6 @@ pub mod error;
 pub mod lexer;
 pub mod parser;
 pub mod token;
+pub use error::Error;
 pub use lexer::Lexer;
+pub use parser::Parser;

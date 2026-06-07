@@ -29,6 +29,7 @@ pub struct Span {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TokenKind<'a> {
+    Eof,
     Comma,
     /// Argument separator in function calls
     Comment,

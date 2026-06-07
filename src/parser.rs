@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::Expr;
+use crate::ast::{Expr, Function, Prototype};
 use crate::error::ParseError;
 use crate::token::TokenKind;
 
@@ -18,7 +18,8 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Creates a new parser, given an token slice, and a hashmap
     /// binding an operator and its precedence in binary expressions.
-    pub const fn new(tokens: &'a [TokenKind<'_>], prec: &'a mut HashMap<char, u8>) -> Self {
+    #[must_use]
+    pub const fn new(tokens: &'a [TokenKind<'_>], prec: &'a HashMap<char, u8>) -> Self {
         Self { tokens, prec, cursor: 0 }
     }
 
@@ -26,7 +27,7 @@ impl<'a> Parser<'a> {
     ///
     /// expression ::= primary binoprhs
     pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_unary_expr()?;
+        let lhs = self.parse_primary()?;
         self.parse_bin_expr(0, lhs)
     }
 
@@ -35,12 +36,11 @@ impl<'a> Parser<'a> {
     /// numberexpr ::= number
     pub fn parse_num_expr(&mut self) -> Result<Expr, ParseError> {
         let token = self.current()?;
-
         let TokenKind::Number(result) = token else {
             return Err(ParseError::ExpectedNumber(token.to_string()));
         };
-
         self.advance().ok();
+
         Ok(Expr::Number(result))
     }
 
@@ -57,7 +57,7 @@ impl<'a> Parser<'a> {
         let result = self.parse_expr()?;
 
         let token = self.current()?;
-        let TokenKind::LParen = token else {
+        let TokenKind::RParen = token else {
             return Err(ParseError::ExpectedRParen(token.to_string()));
         };
         self.advance().ok();
@@ -116,22 +116,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a unary expression.
-    ///
-    /// unary ::= op unary | primary
-    pub fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
-        if let TokenKind::Op(op) = self.current()? {
-            self.advance()?;
-
-            return Ok(Expr::Call {
-                name: format!("unary{op}"),
-                args: vec![self.parse_unary_expr()?],
-            });
-        }
-
-        self.parse_primary()
-    }
-
     /// Parses a binary expression given its left-hand side.
     ///
     /// binoprhs ::= (op unary)*
@@ -149,7 +133,7 @@ impl<'a> Parser<'a> {
 
             self.advance()?;
 
-            let mut rhs = self.parse_unary_expr()?;
+            let mut rhs = self.parse_primary()?;
             if let Some(next_prec) = self.tok_precedence()
                 && tok_prec < next_prec
             {
@@ -158,6 +142,79 @@ impl<'a> Parser<'a> {
 
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
+    }
+
+    /// Parses a function prototype.
+    ///
+    /// prototype ::= id '(' id* ')'
+    ///             | 'binary' op number? '(' id id ')'
+    ///             | 'unary'  op         '(' id ')'
+    pub fn parse_prototype(&mut self) -> Result<Prototype, ParseError> {
+        let token = self.current()?;
+        let TokenKind::Ident(ident) = token else {
+            return Err(ParseError::ExpectedPrototypeName(token.to_string()));
+        };
+        let ident = ident.to_owned();
+        self.advance()?;
+
+        let token = self.current()?;
+        let TokenKind::LParen = token else {
+            return Err(ParseError::ExpectedLParen(token.to_string()));
+        };
+        self.advance()?;
+
+        let mut args = Vec::new();
+        // Handles both the no-arg case (immediate ')') and the multi-arg case.
+        while !matches!(self.current()?, TokenKind::RParen) {
+            let token = self.current()?;
+            let TokenKind::Ident(name) = token else {
+                return Err(ParseError::ExpectedIdent(token.to_string()));
+            };
+
+            args.push(name.to_owned());
+            self.advance()?;
+
+            match self.current()? {
+                TokenKind::Comma => self.advance()?,
+                TokenKind::RParen => break,
+                token => return Err(ParseError::ExpectedCommaOrRParen(token.to_string())),
+            }
+        }
+
+        self.advance().ok(); // consume RParen, soft-fail at EOF
+
+        Ok(Prototype { name: ident, args })
+    }
+
+    /// Parses a function definition.
+    ///
+    /// definition ::= 'def' prototype expression
+    pub fn parse_definition(&mut self) -> Result<Function, ParseError> {
+        self.advance()?; // eat 'def'
+
+        let proto = self.parse_prototype()?;
+        Ok(Function { proto, body: Some(self.parse_expr()?) })
+    }
+
+    /// Parses an external function declaration.
+    ///
+    /// external ::= 'extern' prototype
+    pub fn parse_extern(&mut self) -> Result<Function, ParseError> {
+        self.advance()?; // eat 'extern'
+        let proto = self.parse_prototype()?;
+
+        Ok(Function { proto, body: None })
+    }
+
+    /// Parses a top-level expression as an anonymous function.
+    ///
+    /// toplevelexpr ::= expression
+    pub fn parse_toplevel_expr(&mut self) -> Result<Function, ParseError> {
+        let expr = self.parse_expr()?;
+        Ok(Function {
+            proto: Prototype { name: FUNCTION.to_owned(), args: vec![] },
+            body: Some(expr),
+        })
     }
 }
 
@@ -187,4 +244,12 @@ impl Parser<'_> {
     /// Returns `true` if [`Parser`] has reached the end of the token stream.
     #[must_use]
     pub const fn is_eof(&self) -> bool { self.cursor >= self.tokens.len() }
+}
+
+#[cfg(test)]
+mod tests {
+    // use super::*;
+
+    #[test]
+    fn parse() {}
 }

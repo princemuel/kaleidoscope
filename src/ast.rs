@@ -21,8 +21,6 @@ pub enum Expr {
 pub struct Prototype {
     pub name: String,
     pub args: Vec<String>,
-    pub prec: u8,
-    pub is_op: bool,
 }
 
 /// Defines an external or user-defined  function
@@ -30,5 +28,4 @@ pub struct Prototype {
 pub struct Function {
     pub proto: Prototype,
     pub body: Option<Expr>,
-    pub is_anon: bool,
 }

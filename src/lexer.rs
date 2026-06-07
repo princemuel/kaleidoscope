@@ -15,16 +15,17 @@ impl<'a> Lexer<'a> {
     pub const fn new(source: &'a str) -> Self { Self { source, cursor: 0 } }
 
     /// Returns the next token from stdin.
-    fn lex_next(&mut self) -> Option<Token<'a>> {
+    fn lex_next(&mut self) -> Token<'a> {
         // skip whitespace
         self.advance_while(|b| b.is_ascii_whitespace());
 
         let start = self.cursor;
 
-        let ch = self.peek()?;
+        let Some(ch) = self.peek() else { return self.simple(TokenKind::Eof, start) };
+
         self.advance(); // consume token
 
-        let token = match ch {
+        match ch {
             b'#' => {
                 self.advance_while(|b| b != b'\n' && b != b'\r');
                 self.simple(TokenKind::Comment, start)
@@ -90,9 +91,7 @@ impl<'a> Lexer<'a> {
             //     self.simple(kind, start)
             // }
             b => self.simple(TokenKind::Op(char::from(b)), start),
-        };
-
-        Some(token)
+        }
     }
 
     fn simple(&self, kind: TokenKind<'a>, start: usize) -> Token<'a> {
@@ -124,9 +123,12 @@ impl<'a> Lexer<'a> {
 }
 
 impl<'a> Iterator for Lexer<'a> {
-    type Item = Token<'a>;
+    type Item = TokenKind<'a>;
 
-    fn next(&mut self) -> Option<Self::Item> { self.lex_next() }
+    fn next(&mut self) -> Option<Self::Item> {
+        let token = self.lex_next();
+        if token.kind == TokenKind::Eof { None } else { Some(token.kind) }
+    }
 }
 
 impl FusedIterator for Lexer<'_> {}
@@ -161,8 +163,8 @@ atan2(sin(.4), cos(42))
 ";
         let lexer = Lexer::new(source);
 
-        for Token { kind, .. } in lexer {
-            println!("{kind:?}");
+        for token in lexer {
+            println!("{token:?}");
         }
     }
 }
