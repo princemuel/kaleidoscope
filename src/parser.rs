@@ -4,107 +4,98 @@ use crate::ast::{Expr, Function, Prototype};
 use crate::error::ParseError;
 use crate::token::TokenKind;
 
-const FUNCTION: &str = "anonymous";
+/// the synthetic prototype wrapping a top-level expression.
+const ANON_FN: &str = "__anon_expr";
 
+/// A recursive-descent / Pratt parser for the Kaleidoscope language
 #[derive(Clone, Debug)]
 pub struct Parser<'a> {
     tokens: &'a [TokenKind<'a>],
-    /// The current position of the token the parser is looking at.
+    /// Index of the token currently being examined.
     cursor: usize,
-    /// Holds the precedence for each binary operator.
+    /// Binary-operator precedence table. Keyed by operator character.
     prec: &'a HashMap<char, u8>,
 }
 
 impl<'a> Parser<'a> {
-    /// Creates a new parser, given an token slice, and a hashmap
-    /// binding an operator and its precedence in binary expressions.
+    /// Construct a parser from a pre-tokenised slice and a precedence table.
     #[must_use]
-    pub const fn new(tokens: &'a [TokenKind<'_>], prec: &'a HashMap<char, u8>) -> Self {
+    pub const fn new(tokens: &'a [TokenKind<'a>], prec: &'a HashMap<char, u8>) -> Self {
         Self { tokens, prec, cursor: 0 }
     }
 
-    /// Parses any expression.
-    ///
     /// expression ::= primary binoprhs
     pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         let lhs = self.parse_primary()?;
         self.parse_bin_expr(0, lhs)
     }
 
-    /// Parses a literal number.
-    ///
     /// numberexpr ::= number
     pub fn parse_num_expr(&mut self) -> Result<Expr, ParseError> {
         let token = self.current()?;
-        let TokenKind::Number(result) = token else {
+        let TokenKind::Number(n) = token else {
             return Err(ParseError::ExpectedNumber(token.to_string()));
         };
-        self.advance().ok();
 
-        Ok(Expr::Number(result))
+        self.advance_unchecked(); // consume the number; soft-fail at EOF is fine here
+        Ok(Expr::Number(n))
     }
 
-    /// Parses an expression enclosed in parentheses.
-    ///
     /// parenexpr ::= '(' expression ')'
     pub fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
+        // Validate and consume '('
         let token = self.current()?;
         let TokenKind::LParen = token else {
             return Err(ParseError::ExpectedLParen(token.to_string()));
         };
-        self.advance()?;
+
+        self.advance()?; // must have tokens after '('
 
         let result = self.parse_expr()?;
 
+        // Validate and consume ')'
         let token = self.current()?;
         let TokenKind::RParen = token else {
             return Err(ParseError::ExpectedRParen(token.to_string()));
         };
-        self.advance().ok();
 
+        self.advance_unchecked(); // ')' may be the last token
         Ok(result)
     }
 
-    /// Parses an expression that starts with an identifier (either a variable
-    /// or a function call).
-    ///
     /// identifierexpr ::= identifier
-    ///                  | identifier '(' expression* ')'
+    ///                   | identifier '(' expression* ')'
     pub fn parse_ident_expr(&mut self) -> Result<Expr, ParseError> {
         let token = self.current()?;
         let TokenKind::Ident(ident) = token else {
             return Err(ParseError::ExpectedIdent(token.to_string()));
         };
+        let name = ident.to_owned();
 
-        let ident = ident.to_owned();
+        self.advance_unchecked(); // move past identifier; may hit EOF
 
-        // Not a call. either EOF or a non-'(' token follows.
-        if self.advance().is_err() || !matches!(self.current()?, TokenKind::LParen) {
-            return Ok(Expr::Variable(ident.clone()));
+        if !matches!(self.current(), Ok(TokenKind::LParen)) {
+            return Ok(Expr::Variable(name));
         }
 
-        // Consume past '('
-        self.advance()?;
+        // It's a call. consume '('
+        self.advance()?; // must have tokens inside arg list or ')'
 
         let mut args = Vec::new();
-        // Handles both the no-arg case (immediate ')') and the multi-arg case.
         while !matches!(self.current()?, TokenKind::RParen) {
             args.push(self.parse_expr()?);
 
             match self.current()? {
-                TokenKind::Comma => self.advance()?,
+                TokenKind::Comma => self.advance()?, // consume ',' then expect more
                 TokenKind::RParen => break,
-                t => {
-                    return Err(ParseError::ExpectedCommaOrRParen(t.to_string()));
-                }
+                t => return Err(ParseError::ExpectedCommaOrRParen(t.to_string())),
             }
         }
-        self.advance().ok(); // consume ')', soft-fail at EOF
-        Ok(Expr::Call { name: ident.clone(), args })
+
+        self.advance_unchecked(); // consume ')'; soft-fail at EOF
+        Ok(Expr::Call { name, args })
     }
 
-    /// Parses a primary expression (identifier, number, or parenthesized).
-    ///
     /// primary ::= identifierexpr | numberexpr | parenexpr
     pub fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.current()? {
@@ -115,45 +106,51 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a binary expression given its left-hand side.
+    /// binoprhs ::= (op primary)*
     ///
-    /// binoprhs ::= (op unary)*
-    pub fn parse_bin_expr(&mut self, prec: u8, mut lhs: Expr) -> Result<Expr, ParseError> {
+    /// Pratt / precedence-climbing parser. `min_prec` is the minimum
+    /// precedence level the next operator must meet to be consumed.
+    pub fn parse_bin_expr(&mut self, min_prec: u8, mut lhs: Expr) -> Result<Expr, ParseError> {
         loop {
+            // If the current token is not a known operator, or its precedence
+            // is below `min_prec`, we are done climbing.
             let tok_prec = match self.tok_precedence() {
-                Some(p) if p >= prec => p,
+                Some(p) if p >= min_prec => p,
                 _ => return Ok(lhs),
             };
 
             let token = self.current()?;
             let TokenKind::Op(op) = token else {
+                // tok_precedence confirmed it's an Op, so this branch is
+                // unreachable but we handle it for exhaustiveness.
                 return Err(ParseError::InvalidOperator(token.to_string()));
             };
 
+            // Consume the operator. Hard-fail: there must be a RHS.
             self.advance()?;
 
             let mut rhs = self.parse_primary()?;
+
+            // If the next operator binds more tightly, give it the RHS first.
             if let Some(next_prec) = self.tok_precedence()
                 && tok_prec < next_prec
             {
-                rhs = self.parse_bin_expr(tok_prec + 1, rhs)?;
+                // used saturating add in the case where there's a user-defined operator with
+                // precedence 255, to avoid overflow.
+                rhs = self.parse_bin_expr(tok_prec.saturating_add(1), rhs)?;
             }
 
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
     }
 
-    /// Parses a function prototype.
-    ///
     /// prototype ::= id '(' id* ')'
-    ///             | 'binary' op number? '(' id id ')'
-    ///             | 'unary'  op         '(' id ')'
     pub fn parse_prototype(&mut self) -> Result<Prototype, ParseError> {
         let token = self.current()?;
         let TokenKind::Ident(ident) = token else {
             return Err(ParseError::ExpectedPrototypeName(token.to_string()));
         };
-        let ident = ident.to_owned();
+        let name = ident.to_owned();
         self.advance()?;
 
         let token = self.current()?;
@@ -163,85 +160,188 @@ impl<'a> Parser<'a> {
         self.advance()?;
 
         let mut args = Vec::new();
-        while let Ok(TokenKind::Ident(name)) = self.current() {
-            args.push(name.to_owned());
-            self.advance().ok(); // soft-fail: EOF after last arg is acceptable
+        while let Ok(TokenKind::Ident(arg)) = self.current() {
+            args.push(arg.to_owned());
+            self.advance_unchecked(); // EOF after last arg is acceptable
         }
 
-        // After the loop, we must be sitting on ')'
         let token = self.current()?;
         let TokenKind::RParen = token else {
             return Err(ParseError::ExpectedRParen(token.to_string()));
         };
-        self.advance().ok(); // consume ')', soft-fail at EOF
 
-        Ok(Prototype { name: ident, args })
+        self.advance_unchecked(); // ')' may be the last token
+        Ok(Prototype { name, args })
     }
 
-    /// Parses a function definition.
-    ///
     /// definition ::= 'def' prototype expression
     pub fn parse_definition(&mut self) -> Result<Function, ParseError> {
         self.advance()?; // eat 'def'
-
         let proto = self.parse_prototype()?;
-        Ok(Function { proto, body: Some(self.parse_expr()?) })
+        let body = self.parse_expr()?;
+        Ok(Function { proto, body: Some(body) })
     }
 
-    /// Parses an external function declaration.
-    ///
     /// external ::= 'extern' prototype
     pub fn parse_extern(&mut self) -> Result<Function, ParseError> {
         self.advance()?; // eat 'extern'
         let proto = self.parse_prototype()?;
-
         Ok(Function { proto, body: None })
     }
 
-    /// Parses a top-level expression as an anonymous function.
-    ///
     /// toplevelexpr ::= expression
+    ///
+    /// Wraps a bare expression in a synthetic anonymous function
     pub fn parse_toplevel_expr(&mut self) -> Result<Function, ParseError> {
         let expr = self.parse_expr()?;
         Ok(Function {
-            proto: Prototype { name: FUNCTION.to_owned(), args: vec![] },
+            proto: Prototype { name: ANON_FN.to_owned(), args: vec![] },
             body: Some(expr),
         })
     }
 }
 
-impl Parser<'_> {
-    /// Returns the current [`TokenKind`], or
-    /// [`UnexpectedEof`](`ParseError::UnexpectedEof`) if the parser has
-    /// reached the end of the token stream.
-    pub fn current(&self) -> Result<TokenKind<'_>, ParseError> {
+impl<'a> Parser<'a> {
+    /// Returns the current token, or `EOF` if the cursor is past
+    /// the end of the token slice.
+    pub fn current(&self) -> Result<TokenKind<'a>, ParseError> {
         self.tokens.get(self.cursor).copied().ok_or(ParseError::UnexpectedEof)
     }
 
+    /// Advance the cursor, returning `Err(UnexpectedEof)` if we move past
+    /// the end. Use when the grammar *requires* a token to follow.
     pub fn advance(&mut self) -> Result<(), ParseError> {
         self.cursor += 1;
         if self.is_eof() { Err(ParseError::UnexpectedEof) } else { Ok(()) }
     }
 
-    /// Returns the precedence of the current [`TokenKind`], or `None` if it is
-    /// not a known binary operator.
+    /// Advance the cursor without failing at EOF.
+    ///
+    /// Use when reaching the end of the stream after consuming a token is
+    /// legitimate
+    ///
+    /// (e.g. closing ')', last argument, numeric literal at the end of input).
+    pub fn advance_unchecked(&mut self) {
+        self.cursor += 1;
+        // cursor may now == tokens.len(); that is fine — is_eof() will reflect
+        // it
+    }
+
+    /// Skip one token for error recovery
+    ///
+    /// Returns `true` if there are more tokens to process.
+    pub fn skip_for_recovery(&mut self) -> bool {
+        self.cursor += 1;
+        !self.is_eof()
+    }
+
+    /// Returns the precedence of the current token if it is a known binary
+    /// operator, or `None` otherwise.
     #[must_use]
     pub fn tok_precedence(&self) -> Option<u8> {
         let TokenKind::Op(op) = self.current().ok()? else { return None };
-
-        let precedence = self.prec.get(&op).copied()?;
-        (precedence > 0).then_some(precedence)
+        let p = self.prec.get(&op).copied()?;
+        (p > 0).then_some(p)
     }
 
-    /// Returns `true` if [`Parser`] has reached the end of the token stream.
+    /// Returns `true` if the cursor is at or past the end of the token slice.
     #[must_use]
     pub const fn is_eof(&self) -> bool { self.cursor >= self.tokens.len() }
 }
 
 #[cfg(test)]
 mod tests {
-    // use super::*;
+    use core::assert_matches;
+
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn make_parser<'a>(
+        src: &'a str,
+        tokens: &'a Vec<TokenKind<'a>>,
+        prec: &'a HashMap<char, u8>,
+    ) -> Parser<'a> {
+        #[expect(clippy::no_effect_underscore_binding)]
+        let _src = src; // held alive by caller
+        Parser::new(tokens, prec)
+    }
+
+    fn default_prec() -> HashMap<char, u8> {
+        [('=', 2u8), ('<', 10), ('+', 20), ('-', 20), ('*', 40), ('/', 40)].into_iter().collect()
+    }
 
     #[test]
-    fn parse() {}
+    fn parse_number() {
+        let prec = default_prec();
+        let src = "42";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let expr = p.parse_expr().unwrap();
+        assert_matches!(expr, Expr::Number(_));
+    }
+
+    #[test]
+    fn parse_binary_add() {
+        let prec = default_prec();
+        let src = "x+y";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let expr = p.parse_expr().unwrap();
+        assert_matches!(expr, Expr::Binary { op: '+', .. });
+    }
+
+    #[test]
+    fn parse_definition() {
+        let prec = default_prec();
+        let src = "def foo(x y) x+y";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let func = p.parse_definition().unwrap();
+        assert_eq!(func.proto.name, "foo");
+        assert_eq!(func.proto.args, vec!["x", "y"]);
+        assert!(func.body.is_some());
+    }
+
+    #[test]
+    fn parse_extern() {
+        let prec = default_prec();
+        let src = "extern sin(a)";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let func = p.parse_extern().unwrap();
+        assert_eq!(func.proto.name, "sin");
+        assert!(func.body.is_none());
+    }
+
+    #[test]
+    fn parse_call_with_float_arg() {
+        let prec = default_prec();
+        let src = "foo(y, 4.0)";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let expr = p.parse_expr().unwrap();
+        assert_matches!(expr, Expr::Call { .. });
+    }
+
+    #[test]
+    fn anon_proto_name() {
+        let prec = default_prec();
+        let src = "1+2";
+
+        let tokens: Vec<_> = Lexer::new(src).tokens().collect();
+        let mut p = make_parser(src, &tokens, &prec);
+
+        let func = p.parse_toplevel_expr().unwrap();
+        assert_eq!(func.proto.name, "__anon_expr");
+    }
 }

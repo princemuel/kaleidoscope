@@ -1,29 +1,31 @@
 //! The Kaleidoscope Abstract Syntax Tree (aka Parse Tree)
-
 use crate::token::Number;
 
-/// Defines a primitive expression.
-#[derive(Clone, Debug, PartialEq)]
+/// Every expression form the language can produce.
 #[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    /// defines a binary operator
+    /// A binary operation: `lhs op rhs`.
     Binary { op: char, lhs: Box<Expr>, rhs: Box<Expr> },
-    /// defines a function call
+    /// A function call: `name(...args)`.
     Call { name: String, args: Vec<Expr> },
-    /// defines numeric literals like `1.0` or 1.
+    /// A numeric literal: `1`, `3.14`, etc.
     Number(Number),
-    /// defines a variable, like `a`
+    /// A variable reference: `x`, `foo`, etc.
     Variable(String),
 }
 
-/// Defines the prototype (name and parameters) of a function
+/// The prototype (signature) of a function: its name and parameter names.
+///
+/// An `extern` declaration has a `Prototype` but no body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prototype {
     pub name: String,
     pub args: Vec<String>,
 }
 
-/// Defines an external or user-defined  function
+/// A function. can be either a definition (with body) or an extern
+/// (without).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Function {
     pub proto: Prototype,
