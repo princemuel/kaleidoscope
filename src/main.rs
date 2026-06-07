@@ -76,8 +76,8 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-// On failure, the following functions skip one token for error recovery,
-// matching the C++ version
+// The following functions skip one token for error recovery On failure
+// matching the C++ version.
 
 /// Handle a `def` — parse a function definition and report success or failure.
 fn handle_definition(parser: &mut Parser<'_>) {
