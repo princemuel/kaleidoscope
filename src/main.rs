@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::io;
 use std::io::prelude::*;
 
+use inkwell::context::Context;
 use kaleidoscope::token::TokenKind;
-use kaleidoscope::{Error, Lexer, Parser};
+use kaleidoscope::{Codegen, Error, Lexer, Parser};
 
 /// Binary-operator precedence table.
 const PRECEDENCE_OPS: [(char, u8); 6] =
@@ -20,6 +21,9 @@ macro_rules! prompt {
 
 fn main() -> Result<(), Error> {
     let prec = HashMap::from(PRECEDENCE_OPS);
+    let context = Context::create();
+
+    let mut _codegen = Codegen::new(&context);
 
     let stdin = io::stdin();
     prompt!();
