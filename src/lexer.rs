@@ -1,6 +1,6 @@
 use core::iter::FusedIterator;
 
-use crate::token::{Number, Span, Token, TokenKind};
+use crate::token::{Span, Token, TokenKind};
 
 /// Transforms a source string into a stream of [`Token`]s.
 #[derive(Clone, Debug)]
@@ -69,9 +69,9 @@ impl<'a> Lexer<'a> {
                 }
 
                 let lexeme = self.slice(start);
-                let kind = match Number::parse(lexeme) {
-                    Some(n) => TokenKind::Number(n),
-                    None => TokenKind::Invalid(lexeme),
+                let kind = match lexeme.parse() {
+                    Ok(n) => TokenKind::Number(n),
+                    Err(_) => TokenKind::Invalid(lexeme),
                 };
                 self.simple(kind, start)
             }
@@ -80,9 +80,9 @@ impl<'a> Lexer<'a> {
                 if self.peek().is_some_and(|b| b.is_ascii_digit()) {
                     self.advance_while(|b| b.is_ascii_digit());
                     let lexeme = self.slice(start);
-                    let kind = match Number::parse(lexeme) {
-                        Some(n) => TokenKind::Number(n),
-                        None => TokenKind::Invalid(lexeme),
+                    let kind = match lexeme.parse() {
+                        Ok(n) => TokenKind::Number(n),
+                        Err(_) => TokenKind::Invalid(lexeme),
                     };
                     self.simple(kind, start)
                 } else {
@@ -189,14 +189,14 @@ mod tests {
     fn lex_dot_led_float() {
         // The C++ version parses ".4" as 0.4; we must match that.
         let tokens = tokenize(".4");
-        assert_eq!(tokens, vec![TokenKind::Number(Number::Float(0.4))]);
+        assert_eq!(tokens, vec![TokenKind::Number(0.4)]);
     }
 
     #[test]
     fn lex_integer_then_dot_op() {
         // "1." should give Int(1) followed by Op('.'), not a float.
         let tokens = tokenize("1.");
-        assert_eq!(tokens[0], TokenKind::Number(Number::Int(1)));
+        assert_eq!(tokens[0], TokenKind::Number(1.0));
         assert_eq!(tokens[1], TokenKind::Op('.'));
     }
 
@@ -214,7 +214,7 @@ mod tests {
         assert_matches!(tokens[1], TokenKind::LParen);
         assert_matches!(tokens[2], TokenKind::Ident("y"));
         assert_matches!(tokens[3], TokenKind::Comma);
-        assert_matches!(tokens[4], TokenKind::Number(Number::Float(_)));
+        assert_matches!(tokens[4], TokenKind::Number(4.0));
         assert_matches!(tokens[5], TokenKind::RParen);
     }
 }

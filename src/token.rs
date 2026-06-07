@@ -40,7 +40,7 @@ pub enum TokenKind<'a> {
     // Literals / identifiers
     /// An identifier, borrowed zero-copy from the source string.
     Ident(&'a str),
-    Number(Number),
+    Number(f64),
     // Named constants: π, etc.
     // Constant(&'a str, f64),
 
@@ -53,27 +53,6 @@ pub enum TokenKind<'a> {
 
     // Emitted when the lexer cannot classify a byte sequence.
     Invalid(&'a str),
-}
-
-/// A numeric literal, preserving whether it was written as an integer or float.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Number {
-    Int(i64),
-    Float(f64),
-}
-
-impl Number {
-    /// Parses a numeric string slice into a [`Number`].
-    ///
-    /// Returns `None` if the string is not a valid finite integer or float.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        if !s.contains('.') {
-            return s.parse().ok().map(Self::Int);
-        }
-        let v: f64 = s.parse().ok()?;
-        v.is_finite().then_some(Self::Float(v))
-    }
 }
 
 impl fmt::Display for TokenKind<'_> {
@@ -99,15 +78,6 @@ impl fmt::Display for TokenKind<'_> {
             Self::LParen => write!(f, "("),
             Self::RParen => write!(f, ")"),
             Self::Op(v) => write!(f, "{v}"),
-        }
-    }
-}
-
-impl fmt::Display for Number {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Int(v) => write!(f, "{v}"),
-            Self::Float(v) => write!(f, "{v}"),
         }
     }
 }

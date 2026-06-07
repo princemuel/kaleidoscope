@@ -1,5 +1,4 @@
 //! The Kaleidoscope Abstract Syntax Tree (aka Parse Tree)
-use crate::token::Number;
 
 /// Every expression form the language can produce.
 #[non_exhaustive]
@@ -10,7 +9,7 @@ pub enum Expr {
     /// A function call: `name(...args)`.
     Call { name: String, args: Vec<Expr> },
     /// A numeric literal: `1`, `3.14`, etc.
-    Number(Number),
+    Number(f64),
     /// A variable reference: `x`, `foo`, etc.
     Variable(String),
 }
