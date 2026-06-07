@@ -155,16 +155,18 @@ mod tests {
 
         //         println!("\n\n");
 
-        let source = "extern sin(arg);
-extern cos(arg);
-extern atan2(arg1 arg2);
+        //         let source = "extern sin(arg);
+        // extern cos(arg);
+        // extern atan2(arg1 arg2);
 
-atan2(sin(.4), cos(42))
-";
+        // atan2(sin(.4), cos(42))
+        // ";
+
+        let source = "def foo(x y) x+y y;";
         let lexer = Lexer::new(source);
 
         for token in lexer {
-            println!("{token:?}");
+            print!("{token:?} ");
         }
     }
 }

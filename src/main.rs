@@ -25,32 +25,37 @@ fn main() -> Result<(), Error> {
 
         let prec = PRECENDENCE_OPS.into();
         let tokens: Vec<_> = Lexer::new(&buffer).collect();
-
         let mut parser = Parser::new(&tokens, &prec);
-        match parser.current()? {
-            TokenKind::Eof => break Ok(()),
-            TokenKind::Op(';') => {
-                parser.advance()?;
+
+        // Keep dispatching until the token stream is exhausted
+        loop {
+            match parser.current() {
+                Err(_) => break,                          // EOF
+                Ok(TokenKind::Eof) => break,
+                Ok(TokenKind::Op(';')) => { parser.advance().ok(); }
+                Ok(TokenKind::Def) => handle_definition(&mut parser),
+                Ok(TokenKind::Extern) => handle_extern(&mut parser),
+                _ => handle_toplevel_expr(&mut parser),
             }
-            TokenKind::Def => handle_definition(&mut parser),
-            TokenKind::Extern => handle_extern(&mut parser),
-            _ => handle_toplevel_expr(&mut parser),
+        }
+
+        // Check if the very first token was EOF (user hit Ctrl+D)
+        if tokens.is_empty() || tokens[0] == TokenKind::Eof {
+            break Ok(());
         }
     }
 }
 
 fn handle_definition(parser: &mut Parser<'_>) {
     match parser.parse_definition() {
-        Ok(v) => {
-            eprintln!("Parsed a function definition: {}", v.proto.name);
-        }
+        Ok(_) => eprintln!("Parsed a function definition."), // drop name
         Err(e) => eprintln!("Error in definition: {e}"),
     }
 }
 
 fn handle_extern(parser: &mut Parser<'_>) {
     match parser.parse_extern() {
-        Ok(v) => eprintln!("Parsed an extern: {}", v.proto.name),
+        Ok(_) => eprintln!("Parsed an extern"), // drop name
         Err(e) => eprintln!("Error parsing extern: {e}"),
     }
 }

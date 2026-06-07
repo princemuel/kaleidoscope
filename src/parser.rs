@@ -99,7 +99,6 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-
         self.advance().ok(); // consume ')', soft-fail at EOF
         Ok(Expr::Call { name: ident.clone(), args })
     }
@@ -164,24 +163,17 @@ impl<'a> Parser<'a> {
         self.advance()?;
 
         let mut args = Vec::new();
-        // Handles both the no-arg case (immediate ')') and the multi-arg case.
-        while !matches!(self.current()?, TokenKind::RParen) {
-            let token = self.current()?;
-            let TokenKind::Ident(name) = token else {
-                return Err(ParseError::ExpectedIdent(token.to_string()));
-            };
-
+        while let Ok(TokenKind::Ident(name)) = self.current() {
             args.push(name.to_owned());
-            self.advance()?;
-
-            match self.current()? {
-                TokenKind::Comma => self.advance()?,
-                TokenKind::RParen => break,
-                token => return Err(ParseError::ExpectedCommaOrRParen(token.to_string())),
-            }
+            self.advance().ok(); // soft-fail: EOF after last arg is acceptable
         }
 
-        self.advance().ok(); // consume RParen, soft-fail at EOF
+        // After the loop, we must be sitting on ')'
+        let token = self.current()?;
+        let TokenKind::RParen = token else {
+            return Err(ParseError::ExpectedRParen(token.to_string()));
+        };
+        self.advance().ok(); // consume ')', soft-fail at EOF
 
         Ok(Prototype { name: ident, args })
     }
