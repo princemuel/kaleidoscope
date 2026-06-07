@@ -1,14 +1,45 @@
+use inkwell::error::Error as InkwellError;
+use inkwell::support::LLVMString;
+use thiserror::Error as ThisError;
+
 /// The top-level error type
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, ThisError)]
 pub enum Error {
     #[error(transparent)]
-    Parser(#[from] ParseError),
+    Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Codegen(#[from] CodegenError),
+
+    #[error(transparent)]
+    Parser(#[from] ParseError),
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, ThisError)]
+pub enum CodegenError {
+    #[error("unknown variable: '{0}'")]
+    UnknownVariable(String),
+
+    #[error("unknown function: '{0}'")]
+    UnknownFunction(String),
+
+    #[error("invalid binary operator: '{0}'")]
+    InvalidBinaryOp(char),
+
+    #[error("argument count mismatch: expected {expected}, got {got}")]
+    ArgCountMismatch { expected: usize, got: usize },
+
+    #[error("function '{0}' cannot be redefined")]
+    FunctionRedefinition(String),
+
+    #[error("{0}")]
+    Inkwell(#[from] InkwellError),
+
+    #[error("{0}")]
+    Llvm(#[from] LLVMString),
+}
+
+#[derive(Debug, ThisError)]
 pub enum ParseError {
     #[error("unexpected end of input")]
     UnexpectedEof,

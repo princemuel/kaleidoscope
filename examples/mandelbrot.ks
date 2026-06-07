@@ -54,13 +54,13 @@ def mandelPlot(
 # Convenience wrapper for plotting the Mandelbrot set.
 #
 # realStart, imagStart -> top-left corner
-# realScale, imagScale -> magnification / step size
-def mandel(realStart imagStart realScale imagScale)
+# realStepSize, imagStepSize -> magnification / step size
+def mandel(realStart imagStart realStepSize imagStepSize)
   mandelPlot(
     realStart,
-    realStart + realScale * 78,
-    realScale,
+    realStart + realStepSize * 78,
+    realStepSize,
     imagStart,
-    imagStart + imagScale * 40,
-    imagScale
+    imagStart + imagStepSize * 40,
+    imagStepSize
   );
