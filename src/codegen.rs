@@ -100,10 +100,10 @@ impl<'ctx> Codegen<'ctx> {
         let fn_type = self.context.f64_type().fn_type(&types, false);
         let fn_val = self.module.add_function(proto.name.as_str(), fn_type, None);
 
-        // Set names for all arguments.
-        for (param, name) in fn_val.get_param_iter().zip(proto.args.iter()) {
-            param.into_float_value().set_name(name);
-        }
+        // // Set names for all arguments.
+        // for (param, name) in fn_val.get_param_iter().zip(proto.args.iter()) {
+        //     param.into_float_value().set_name(name);
+        // }
 
         // finally return built prototype
         Ok(fn_val)
