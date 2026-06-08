@@ -32,6 +32,9 @@ pub enum CodegenError {
     #[error("function '{0}' cannot be redefined")]
     FunctionRedefinition(String),
 
+    #[error("function verification failed: '{0}'")]
+    VerificationFailed(String),
+
     #[error(transparent)]
     Builder(#[from] BuilderError),
 
