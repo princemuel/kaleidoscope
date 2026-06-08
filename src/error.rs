@@ -45,7 +45,7 @@ pub enum CodegenError {
     Unknown(String),
 }
 
-#[derive(Debug, ThisError)]
+#[derive(Debug, ThisError, PartialEq)]
 pub enum ParseError {
     #[error("unexpected end of input")]
     UnexpectedEof,
