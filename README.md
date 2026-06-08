@@ -8,8 +8,6 @@ The goal is not just to translate the C++ but to implement each stage
 idiomatically in Rust: zero-copy lexing, sum-type AST, structured errors,
 and safe LLVM bindings via [inkwell][inkwell].
 
----
-
 ## Table of contents
 
 - [Kaleidoscope](#kaleidoscope)
@@ -27,8 +25,6 @@ and safe LLVM bindings via [inkwell][inkwell].
   - [Design notes](#design-notes)
   - [Deviations from the C++ reference](#deviations-from-the-c-reference)
   - [License](#license)
-
----
 
 ## Language overview
 
@@ -54,8 +50,6 @@ Read top-level expression:
 define double @__anon_expr() { ... }
 ```
 
----
-
 ## Project structure
 
 ```console
@@ -72,15 +66,13 @@ src/
 examples/           # .ks source files for manual testing
 ```
 
----
-
 ## Chapters
 
 ### Stage 1: Lexer `(tag: stage1-lexer)`
 
 **Tutorial chapter:** [Ch. 1 — The Lexer][ch1]
 
-The lexer transforms a `&str` into a stream of [`TokenKind`] values.
+The lexer transforms a `&str` into a stream of `TokenKind` values.
 It operates on a pre-loaded string via a byte-index cursor — no `getchar()`,
 no global state.
 
@@ -90,7 +82,7 @@ Key implementation choices vs the C++ reference:
 | ---------------------------------- | -------------------------------------------- |
 | `getchar()` / `static LastChar`    | Byte-cursor over `&'a str`                   |
 | `IdentifierStr` / `NumVal` globals | Data carried inside `TokenKind` variants     |
-| Recursive comment handling         | Iterator `loop` — no stack cost              |
+| Recursive comment handling         | Iterator `loop`                              |
 | `strtod` accepts `"1.2.3"`         | Strict: digit-run then optional `.digit-run` |
 | `".4"` parsed as `0.4`             | Matched — dot-led floats supported           |
 | `"1."` parsed as a float           | Fixed — produces `Number(1.0)` + `Op('.')`   |
@@ -141,8 +133,6 @@ Two cursor advance variants make intent explicit at every call site:
 
 - `advance()` — hard fail: a token _must_ follow (e.g. after an operator)
 - `advance_unchecked()` — soft: EOF is grammatically acceptable (e.g. after `)`)
-
----
 
 ### Stage 3: LLVM IR Codegen `(tag: stage3-codegen)`
 
@@ -203,8 +193,6 @@ This implementation fixes it by always populating `symbols` from
 from the existing IR, so `b` is correctly in scope regardless of what the
 earlier `extern` declared.
 
----
-
 ## Prerequisites
 
 | Requirement    | Version                   |
@@ -238,8 +226,6 @@ Verify:
 llvm-config --version   # should print 22.x.x
 ```
 
----
-
 ## Building
 
 ```sh
@@ -253,8 +239,6 @@ Release build:
 ```sh
 cargo build --release
 ```
-
----
 
 ## Running
 
@@ -302,8 +286,6 @@ You can also pipe a source file:
 cargo run < examples/fib.ks
 ```
 
----
-
 ## Testing
 
 ```sh
@@ -330,8 +312,6 @@ The test suite covers:
   scoping, extern→def resolution (the tutorial bug fix), redefinition
   rejection, failed-body cleanup
 
----
-
 ## Design notes
 
 **Zero-copy lexing.** `TokenKind::Ident(&'a str)` borrows directly from
@@ -354,8 +334,6 @@ later chapters without a breaking change.
 enums with per-variant messages carrying the offending token or name.
 The top-level `Error` type wraps both plus `io::Error`.
 
----
-
 ## Deviations from the C++ reference
 
 | Area                             | C++                                                 | This implementation                                       |
@@ -375,8 +353,6 @@ The top-level `Error` type wraps both plus `io::Error`.
 | Error reporting                  | `fprintf(stderr, ...)` + `nullptr` return           | `Result<T, ParseError>` / `Result<T, CodegenError>`       |
 | `extern foo(a)` + `def foo(b) b` | **Bug: `b` not in scope**                           | **Fixed: symbols populated from definition**              |
 | Anon function lifetime           | Kept in module (would conflict on 2nd)              | Deleted after printing (chapter 4 pattern, applied early) |
-
----
 
 ## License
 
