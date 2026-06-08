@@ -4,9 +4,9 @@ use std::io::prelude::*;
 
 use inkwell::context::Context;
 use inkwell::targets::{InitializationConfig, Target};
-use kaleidoscope::error::CodegenError;
-use kaleidoscope::token::TokenKind;
-use kaleidoscope::{Codegen, Error, Lexer, Parser};
+use klyd::error::CodegenError;
+use klyd::token::TokenKind;
+use klyd::{Codegen, Error, Lexer, Parser};
 
 /// Binary-operator precedence table.
 const PRECEDENCE_OPS: [(char, u8); 6] =
@@ -27,7 +27,7 @@ fn main() -> Result<(), Error> {
     // Target::initialize_all(&InitializationConfig::default());
     Target::initialize_native(&InitializationConfig::default()).map_err(CodegenError::Unknown)?;
     let context = Context::create();
-    let mut _codegen = Codegen::new("my cool jit", &context);
+    let mut codegen = Codegen::new("my cool jit", &context);
 
     let stdin = io::stdin();
     prompt!();
@@ -66,11 +66,11 @@ fn main() -> Result<(), Error> {
                     parser.advance_unchecked();
                 }
 
-                Ok(TokenKind::Def) => handle_definition(&mut parser),
-                Ok(TokenKind::Extern) => handle_extern(&mut parser),
+                Ok(TokenKind::Def) => handle_definition(&mut parser, &mut codegen),
+                Ok(TokenKind::Extern) => handle_extern(&mut parser, &mut codegen),
 
                 // Any other token: treat as a top-level expression.
-                _ => handle_toplevel_expr(&mut parser),
+                _ => handle_toplevel_expr(&mut parser, &mut codegen),
             }
         }
 
@@ -88,9 +88,15 @@ fn main() -> Result<(), Error> {
 // matching the C++ version.
 
 /// Handle a `def` — parse a function definition and report success or failure.
-fn handle_definition(parser: &mut Parser<'_>) {
+fn handle_definition(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
     match parser.parse_definition() {
-        Ok(_) => eprintln!("Parsed a function definition."),
+        Ok(func) => match codegen.function(&func) {
+            Ok(fn_val) => {
+                eprintln!("Read function definition:");
+                fn_val.print_to_stderr();
+            }
+            Err(e) => eprintln!("Codegen error: {e}"),
+        },
         Err(e) => {
             eprintln!("Error in definition: {e}");
             parser.skip_for_recovery();
@@ -99,20 +105,36 @@ fn handle_definition(parser: &mut Parser<'_>) {
 }
 
 /// Handle an `extern` declaration.
-fn handle_extern(parser: &mut Parser<'_>) {
+fn handle_extern(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
     match parser.parse_extern() {
-        Ok(_) => eprintln!("Parsed an extern"),
+        Ok(func) => match codegen.proto(&func.proto) {
+            Ok(proto) => {
+                eprintln!("Read extern: ");
+                proto.print_to_stderr();
+            }
+            Err(e) => eprintln!("Codegen error: {e}"),
+        },
         Err(e) => {
             eprintln!("Error parsing extern: {e}");
             parser.skip_for_recovery();
         }
     }
 }
-
 /// Handle a top-level expression.
-fn handle_toplevel_expr(parser: &mut Parser<'_>) {
+fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
     match parser.parse_toplevel_expr() {
-        Ok(_) => eprintln!("Parsed a top-level expr"),
+        Ok(func) => match codegen.function(&func) {
+            Ok(fn_val) => {
+                eprintln!("Read top-level expression:");
+                fn_val.print_to_stderr();
+                // erase so it doesn't conflict on the next top-level expr
+                #[expect(unsafe_code)]
+                unsafe {
+                    fn_val.delete();
+                };
+            }
+            Err(e) => eprintln!("Codegen error: {e}"),
+        },
         Err(e) => {
             eprintln!("Error: {e}");
             parser.skip_for_recovery();
