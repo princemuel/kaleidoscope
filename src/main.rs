@@ -22,15 +22,14 @@ macro_rules! prompt {
 }
 
 fn main() -> Result<(), Error> {
-    let prec = HashMap::from(PRECEDENCE_OPS);
+    let stdin = io::stdin();
+    prompt!();
 
-    // Target::initialize_all(&InitializationConfig::default());
+    // Make the module, which holds all the code.
     Target::initialize_native(&InitializationConfig::default()).map_err(CodegenError::Unknown)?;
     let context = Context::create();
     let mut codegen = Codegen::new("my cool jit", &context);
-
-    let stdin = io::stdin();
-    prompt!();
+    let prec = HashMap::from(PRECEDENCE_OPS);
 
     for line in stdin.lock().lines() {
         let buffer = line?;
@@ -54,8 +53,7 @@ fn main() -> Result<(), Error> {
 
         let mut parser = Parser::new(&tokens, &prec);
 
-        // Dispatch loop: consume the token slice left-to-right, matching
-        // C++ MainLoop()'s while(true) switch on CurTok.
+        // Run the "interpreter loop".
         loop {
             match parser.current() {
                 // Past the end of the token slice...be done with this line.
@@ -80,6 +78,9 @@ fn main() -> Result<(), Error> {
         // user's perspective means "after the previous output".
         prompt!();
     }
+
+    // Print out all of the generated code.
+    codegen.module.print_to_stderr();
 
     Ok(())
 }
