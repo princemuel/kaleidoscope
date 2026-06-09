@@ -4,33 +4,42 @@ use std::collections::HashMap;
 use inkwell::FloatPredicate;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
+use inkwell::execution_engine::ExecutionEngine;
 use inkwell::module::Module;
 use inkwell::values::{FloatValue, FunctionValue};
 
 use crate::ast::{Expr, Function, Prototype};
 use crate::error::CodegenError;
 
-type SymbolTable<'ctx> = HashMap<String, FloatValue<'ctx>>;
+pub type SymbolTable<'ctx> = HashMap<String, FloatValue<'ctx>>;
 
-pub struct Codegen<'ctx> {
+pub struct CodeGen<'ctx> {
     pub context: &'ctx Context,
     /// helper object that makes it easy to generate LLVM instructions
     pub builder: Builder<'ctx>,
     /// top-level structure the LLVM IR uses to contain code
     pub module: Module<'ctx>,
+    /// the
+    pub engine: ExecutionEngine<'ctx>,
     /// the symbol table for the code aka `NamedValues`
     pub symbols: SymbolTable<'ctx>,
 }
 
-impl<'ctx> Codegen<'ctx> {
+impl<'ctx> CodeGen<'ctx> {
     #[must_use]
     pub fn new(name: &str, ctx: &'ctx Context) -> Self {
         let module = ctx.create_module(name);
         let builder = ctx.create_builder();
-        Self { context: ctx, module, builder, symbols: SymbolTable::default() }
+        Self {
+            context: ctx,
+            module,
+            builder,
+            symbols: SymbolTable::default(),
+            engine: unimplemented!(),
+        }
     }
 
-    pub fn function(&mut self, func: &Function) -> Result<FunctionValue<'ctx>, CodegenError> {
+    pub fn func(&mut self, func: &Function) -> Result<FunctionValue<'ctx>, CodegenError> {
         let proto = &func.proto;
 
         let fn_val = match self.module.get_function(&proto.name) {
@@ -174,19 +183,18 @@ impl<'ctx> Codegen<'ctx> {
 
 #[cfg(test)]
 mod tests {
-
     use core::assert_matches;
 
     use inkwell::context::Context;
 
     use crate::ast::{Expr, Function, Prototype};
-    use crate::codegen::Codegen;
+    use crate::codegen::CodeGen;
     use crate::error::CodegenError;
 
     /// Construct a fresh `Codegen` tied to the provided `Context`.
     /// Every test that needs a `Codegen` calls this so the context lifetime
     /// is owned by the test frame, not by the codegen struct.
-    fn make_codegen(ctx: &Context) -> Codegen<'_> { Codegen::new("test_module", ctx) }
+    fn make_codegen(ctx: &Context) -> CodeGen<'_> { CodeGen::new("test_module", ctx) }
 
     /// Build a `Prototype` with the given name and argument names.
     fn proto(name: &str, args: &[&str]) -> Prototype {
@@ -507,7 +515,7 @@ mod tests {
 
         // def add(a b) a + b
         let body = binop('+', var("a"), var("b"));
-        let fn_val = cg.function(&func("add", &["a", "b"], body)).unwrap();
+        let fn_val = cg.func(&func("add", &["a", "b"], body)).unwrap();
 
         assert!(fn_val.verify(false));
         assert_eq!(fn_val.count_params(), 2);
@@ -520,7 +528,7 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         let body = binop('+', var("x"), var("y"));
-        let fn_val = cg.function(&func("named", &["x", "y"], body)).unwrap();
+        let fn_val = cg.func(&func("named", &["x", "y"], body)).unwrap();
 
         let names: Vec<_> =
             fn_val.get_param_iter().map(|p| p.get_name().to_str().unwrap().to_owned()).collect();
@@ -533,7 +541,7 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         // First function with param `a`.
-        cg.function(&func("first", &["a"], var("a"))).unwrap();
+        cg.func(&func("first", &["a"], var("a"))).unwrap();
         assert!(
             !cg.symbols.contains_key("a"),
             "symbols must be cleared after function body is compiled"
@@ -548,9 +556,9 @@ mod tests {
         let ctx = Context::create();
         let mut cg = make_codegen(&ctx);
 
-        cg.function(&extern_func("foo", &["a"])).unwrap();
+        cg.func(&extern_func("foo", &["a"])).unwrap();
 
-        let result = cg.function(&func("foo", &["b"], var("b")));
+        let result = cg.func(&func("foo", &["b"], var("b")));
         assert!(result.is_ok(), "def foo(b) b should resolve 'b', not 'a': {result:?}");
     }
 
@@ -559,9 +567,9 @@ mod tests {
         let ctx = Context::create();
         let mut cg = make_codegen(&ctx);
 
-        cg.function(&func("dup", &["x"], var("x"))).unwrap();
+        cg.func(&func("dup", &["x"], var("x"))).unwrap();
 
-        let err = cg.function(&func("dup", &["x"], var("x"))).unwrap_err();
+        let err = cg.func(&func("dup", &["x"], var("x"))).unwrap_err();
         assert_matches!(err, CodegenError::FunctionRedefinition(n) if n == "dup");
     }
 
@@ -571,11 +579,10 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         // Declare extern with 1 arg.
-        cg.function(&extern_func("foo", &["a"])).unwrap();
+        cg.func(&extern_func("foo", &["a"])).unwrap();
 
         // Try to define with 2 args.
-        let err =
-            cg.function(&func("foo", &["a", "b"], binop('+', var("a"), var("b")))).unwrap_err();
+        let err = cg.func(&func("foo", &["a", "b"], binop('+', var("a"), var("b")))).unwrap_err();
         assert_matches!(err, CodegenError::ArgCountMismatch { expected: 1, got: 2 });
     }
 
@@ -584,7 +591,7 @@ mod tests {
         let ctx = Context::create();
         let mut cg = make_codegen(&ctx);
 
-        let fn_val = cg.function(&extern_func("cos", &["x"])).unwrap();
+        let fn_val = cg.func(&extern_func("cos", &["x"])).unwrap();
         assert_eq!(
             fn_val.count_basic_blocks(),
             0,
@@ -600,7 +607,7 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         // Body references an undefined variable — will fail.
-        let result = cg.function(&func("bad", &["x"], var("undefined")));
+        let result = cg.func(&func("bad", &["x"], var("undefined")));
         assert!(result.is_err());
 
         // The function must have been erased.
@@ -617,7 +624,7 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         let body = call("fib", vec![var("x")]);
-        let result = cg.function(&func("fib", &["x"], body));
+        let result = cg.func(&func("fib", &["x"], body));
         assert!(result.is_ok());
     }
 
@@ -630,7 +637,7 @@ mod tests {
         let mut cg = make_codegen(&ctx);
 
         let body = binop('+', num(4.0), num(5.0));
-        let fn_val = cg.function(&func("", &[], body)).unwrap();
+        let fn_val = cg.func(&func("", &[], body)).unwrap();
         assert!(fn_val.verify(false));
 
         // The IR text must contain "ret double 9.0".
@@ -648,10 +655,10 @@ mod tests {
         let ctx = Context::create();
         let mut cg = make_codegen(&ctx);
 
-        cg.function(&extern_func("cos", &["x"])).unwrap();
+        cg.func(&extern_func("cos", &["x"])).unwrap();
 
         let body = call("cos", vec![num(1.234)]);
-        let fn_val = cg.function(&func("", &[], body)).unwrap();
+        let fn_val = cg.func(&func("", &[], body)).unwrap();
         assert!(fn_val.verify(false));
 
         let ir = fn_val.to_string();
@@ -674,7 +681,7 @@ mod tests {
             binop('*', var("b"), var("b")),
         );
 
-        let fn_val = cg.function(&func("foo", &["a", "b"], body)).unwrap();
+        let fn_val = cg.func(&func("foo", &["a", "b"], body)).unwrap();
         assert!(fn_val.verify(false));
 
         let ir = fn_val.to_string();
@@ -687,8 +694,8 @@ mod tests {
         let ctx = Context::create();
         let mut cg = make_codegen(&ctx);
 
-        cg.function(&extern_func("sin", &["x"])).unwrap();
-        cg.function(&func(
+        cg.func(&extern_func("sin", &["x"])).unwrap();
+        cg.func(&func(
             "double_sin",
             &["x"],
             binop('+', call("sin", vec![var("x")]), call("sin", vec![var("x")])),
