@@ -70,7 +70,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "klyd"
+name = "kcc"
 version = "0.1.0"
 dependencies = [
  "inkwell",

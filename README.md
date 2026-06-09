@@ -1,30 +1,12 @@
-# Kaleidoscope
+# LLVM's Kaleidoscope language In Rust: kaleidoscope
 
-A Rust port of the [LLVM Kaleidoscope tutorial][tutorial] — a from-scratch
+A Rust port of the [LLVM Kaleidoscope tutorial][tutorial]. This is a from-scratch
 implementation of a small functional language, built chapter by chapter
 alongside the original C++ reference.
 
 The goal is not just to translate the C++ but to implement each stage
 idiomatically in Rust: zero-copy lexing, sum-type AST, structured errors,
-and safe LLVM bindings via [inkwell][inkwell].
-
-## Table of contents
-
-- [Kaleidoscope](#kaleidoscope)
-  - [Table of contents](#table-of-contents)
-  - [Language overview](#language-overview)
-  - [Project structure](#project-structure)
-  - [Chapters](#chapters)
-    - [Stage 1: Lexer `(tag: stage1-lexer)`](#stage-1-lexer-tag-stage1-lexer)
-    - [Stage 2: Parser \& AST `(tag: stage2-parser)`](#stage-2-parser--ast-tag-stage2-parser)
-    - [Stage 3: LLVM IR Codegen `(tag: stage3-codegen)`](#stage-3-llvm-ir-codegen-tag-stage3-codegen)
-  - [Prerequisites](#prerequisites)
-  - [Building](#building)
-  - [Running](#running)
-  - [Testing](#testing)
-  - [Design notes](#design-notes)
-  - [Deviations from the C++ reference](#deviations-from-the-c-reference)
-  - [License](#license)
+and safe(ish) LLVM bindings via [inkwell][inkwell] making use of Rust's inherent safety and expressiveness.
 
 ## Language overview
 
@@ -50,27 +32,11 @@ Read top-level expression:
 define double @__anon_expr() { ... }
 ```
 
-## Project structure
-
-```console
-src/
-├── lib.rs          # public re-exports
-├── main.rs         # REPL driver
-├── token.rs        # TokenKind, Number, Span
-├── lexer.rs        # zero-copy byte-cursor lexer
-├── ast.rs          # Expr, Prototype, Function
-├── parser.rs       # recursive-descent / Pratt parser
-├── codegen.rs      # LLVM IR emission via inkwell
-└── error.rs        # ParseError, CodegenError, top-level Error
-
-examples/           # .ks source files for manual testing
-```
-
 ## Chapters
 
 ### Stage 1: Lexer `(tag: stage1-lexer)`
 
-**Tutorial chapter:** [Ch. 1 — The Lexer][ch1]
+**Tutorial chapter:** [Ch. 1 - Kaleidoscope Introduction and the Lexer][ch1]
 
 The lexer transforms a `&str` into a stream of `TokenKind` values.
 It operates on a pre-loaded string via a byte-index cursor — no `getchar()`,
