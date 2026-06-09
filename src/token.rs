@@ -1,11 +1,11 @@
 use core::fmt;
 
-/// A fully classified token together with its source span.
+/// The token includes its kind together with its source span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Token<'a> {
     /// Every distinct kind of token the lexer can produce.
-    pub kind: TokenKind<'a>,
-    /// A byte-range into the original source string. Used for diagnostics.
+    pub kind: Kind<'a>,
+    /// A byte-range into the original source string.
     pub span: Span,
 }
 
@@ -18,7 +18,7 @@ pub struct Span {
 
 /// Every distinct kind of token the lexer can produce.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TokenKind<'a> {
+pub enum Kind<'a> {
     Eof,
     Comma,
     Comment,
@@ -33,12 +33,11 @@ pub enum TokenKind<'a> {
     Then,
     Var,
 
-    // Extension keywords (for later chapters of the tutorial)
+    // Extension keywords
     Binary,
     Unary,
 
     // Literals / identifiers
-    /// An identifier, borrowed zero-copy from the source string.
     Ident(&'a str),
     Number(f64),
     // Named constants: π, etc.
@@ -48,14 +47,14 @@ pub enum TokenKind<'a> {
     LParen,
     RParen,
 
-    // A single-character operator (+, -, *, /, <, =, …)
+    /// A single-character operator (+, -, *, /, <, =, ...)
     Op(char),
 
     // Emitted when the lexer cannot classify a byte sequence.
     Invalid(&'a str),
 }
 
-impl fmt::Display for TokenKind<'_> {
+impl fmt::Display for Kind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Eof => write!(f, "<eof>"),

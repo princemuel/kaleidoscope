@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::ast::{Expr, Function, Prototype};
 use crate::error::ParseError;
-use crate::token::TokenKind;
+use crate::token::Kind;
 
 /// the synthetic prototype wrapping a top-level expression.
 const ANON_FN: &str = "__anon_expr";
@@ -10,7 +10,7 @@ const ANON_FN: &str = "__anon_expr";
 /// A recursive-descent / Pratt parser for the Kaleidoscope language
 #[derive(Clone, Debug)]
 pub struct Parser<'a> {
-    tokens: &'a [TokenKind<'a>],
+    tokens: &'a [Kind<'a>],
     /// Index of the token currently being examined.
     cursor: usize,
     /// Binary-operator precedence table. Keyed by operator character.
@@ -20,7 +20,7 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Construct a parser from a pre-tokenised slice and a precedence table.
     #[must_use]
-    pub const fn new(tokens: &'a [TokenKind<'a>], prec: &'a HashMap<char, u8>) -> Self {
+    pub const fn new(tokens: &'a [Kind<'a>], prec: &'a HashMap<char, u8>) -> Self {
         Self { tokens, prec, cursor: 0 }
     }
 
@@ -33,7 +33,7 @@ impl<'a> Parser<'a> {
     /// numberexpr ::= number
     pub fn parse_num_expr(&mut self) -> Result<Expr, ParseError> {
         let token = self.current()?;
-        let TokenKind::Number(n) = token else {
+        let Kind::Number(n) = token else {
             return Err(ParseError::ExpectedNumber(token.to_string()));
         };
 
@@ -45,7 +45,7 @@ impl<'a> Parser<'a> {
     pub fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
         // Validate and consume '('
         let token = self.current()?;
-        let TokenKind::LParen = token else {
+        let Kind::LParen = token else {
             return Err(ParseError::ExpectedLParen(token.to_string()));
         };
 
@@ -55,7 +55,7 @@ impl<'a> Parser<'a> {
 
         // Validate and consume ')'
         let token = self.current()?;
-        let TokenKind::RParen = token else {
+        let Kind::RParen = token else {
             return Err(ParseError::ExpectedRParen(token.to_string()));
         };
 
@@ -67,14 +67,14 @@ impl<'a> Parser<'a> {
     ///                   | identifier '(' expression* ')'
     pub fn parse_ident_expr(&mut self) -> Result<Expr, ParseError> {
         let token = self.current()?;
-        let TokenKind::Ident(ident) = token else {
+        let Kind::Ident(ident) = token else {
             return Err(ParseError::ExpectedIdent(token.to_string()));
         };
         let name = ident.to_owned();
 
         self.advance_unchecked(); // move past identifier; may hit EOF
 
-        if !matches!(self.current(), Ok(TokenKind::LParen)) {
+        if !matches!(self.current(), Ok(Kind::LParen)) {
             return Ok(Expr::Variable(name));
         }
 
@@ -82,12 +82,12 @@ impl<'a> Parser<'a> {
         self.advance()?; // must have tokens inside arg list or ')'
 
         let mut args = Vec::new();
-        while !matches!(self.current()?, TokenKind::RParen) {
+        while !matches!(self.current()?, Kind::RParen) {
             args.push(self.parse_expr()?);
 
             match self.current()? {
-                TokenKind::Comma => self.advance()?, // consume ',' then expect more
-                TokenKind::RParen => break,
+                Kind::Comma => self.advance()?, // consume ',' then expect more
+                Kind::RParen => break,
                 t => return Err(ParseError::ExpectedCommaOrRParen(t.to_string())),
             }
         }
@@ -99,9 +99,9 @@ impl<'a> Parser<'a> {
     /// primary ::= identifierexpr | numberexpr | parenexpr
     pub fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.current()? {
-            TokenKind::Ident(_) => self.parse_ident_expr(),
-            TokenKind::Number(_) => self.parse_num_expr(),
-            TokenKind::LParen => self.parse_paren_expr(),
+            Kind::Ident(_) => self.parse_ident_expr(),
+            Kind::Number(_) => self.parse_num_expr(),
+            Kind::LParen => self.parse_paren_expr(),
             token => Err(ParseError::ExpectedExpr(token.to_string())),
         }
     }
@@ -120,7 +120,7 @@ impl<'a> Parser<'a> {
             };
 
             let token = self.current()?;
-            let TokenKind::Op(op) = token else {
+            let Kind::Op(op) = token else {
                 // tok_precedence confirmed it's an Op, so this branch is
                 // unreachable but we handle it for exhaustiveness.
                 return Err(ParseError::InvalidOperator(token.to_string()));
@@ -147,26 +147,26 @@ impl<'a> Parser<'a> {
     /// prototype ::= id '(' id* ')'
     pub fn parse_prototype(&mut self) -> Result<Prototype, ParseError> {
         let token = self.current()?;
-        let TokenKind::Ident(ident) = token else {
+        let Kind::Ident(ident) = token else {
             return Err(ParseError::ExpectedPrototypeName(token.to_string()));
         };
         let name = ident.to_owned();
         self.advance()?;
 
         let token = self.current()?;
-        let TokenKind::LParen = token else {
+        let Kind::LParen = token else {
             return Err(ParseError::ExpectedLParen(token.to_string()));
         };
         self.advance()?;
 
         let mut args = Vec::new();
-        while let Ok(TokenKind::Ident(arg)) = self.current() {
+        while let Ok(Kind::Ident(arg)) = self.current() {
             args.push(arg.to_owned());
             self.advance_unchecked(); // EOF after last arg is acceptable
         }
 
         let token = self.current()?;
-        let TokenKind::RParen = token else {
+        let Kind::RParen = token else {
             return Err(ParseError::ExpectedRParen(token.to_string()));
         };
 
@@ -204,7 +204,7 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     /// Returns the current token, or `EOF` if the cursor is past
     /// the end of the token slice.
-    pub fn current(&self) -> Result<TokenKind<'a>, ParseError> {
+    pub fn current(&self) -> Result<Kind<'a>, ParseError> {
         self.tokens.get(self.cursor).copied().ok_or(ParseError::UnexpectedEof)
     }
 
@@ -239,7 +239,7 @@ impl<'a> Parser<'a> {
     /// operator, or `None` otherwise.
     #[must_use]
     pub fn tok_precedence(&self) -> Option<u8> {
-        let TokenKind::Op(op) = self.current().ok()? else { return None };
+        let Kind::Op(op) = self.current().ok()? else { return None };
         let p = self.prec.get(&op).copied()?;
         (p > 0).then_some(p)
     }
@@ -264,7 +264,7 @@ mod tests {
 
     /// Lex `src` and return a parser over the resulting token slice.
     /// The token `Vec` is returned alongside so it outlives the parser.
-    fn parser(src: &str) -> (Vec<TokenKind<'_>>, HashMap<char, u8>) {
+    fn parser(src: &str) -> (Vec<Kind<'_>>, HashMap<char, u8>) {
         let tokens = Lexer::new(src).tokens().collect();
         let prec = default_prec();
         (tokens, prec)
@@ -310,7 +310,7 @@ mod tests {
     fn current_returns_first_token() {
         let (tokens, prec) = parser("def");
         let p = Parser::new(&tokens, &prec);
-        assert_eq!(p.current(), Ok(TokenKind::Def));
+        assert_eq!(p.current(), Ok(Kind::Def));
     }
 
     #[test]
@@ -325,7 +325,7 @@ mod tests {
         let (tokens, prec) = parser("def extern");
         let mut p = Parser::new(&tokens, &prec);
         p.advance().unwrap();
-        assert_eq!(p.current(), Ok(TokenKind::Extern));
+        assert_eq!(p.current(), Ok(Kind::Extern));
     }
 
     #[test]
@@ -367,7 +367,7 @@ mod tests {
         let mut p = Parser::new(&tokens, &prec);
         let more = p.skip_for_recovery();
         assert!(more);
-        assert_eq!(p.current(), Ok(TokenKind::Ident("y")));
+        assert_eq!(p.current(), Ok(Kind::Ident("y")));
     }
 
     #[test]
@@ -585,7 +585,7 @@ mod tests {
         let expr = p.parse_expr().unwrap();
         assert_eq!(expr, Expr::Variable("x".to_owned()));
         // cursor must be sitting on '%'
-        assert_eq!(p.current(), Ok(TokenKind::Op('%')));
+        assert_eq!(p.current(), Ok(Kind::Op('%')));
     }
 
     #[test]
@@ -775,11 +775,11 @@ mod tests {
 
         // Advance original — clone must be unaffected.
         original.advance_unchecked();
-        assert_eq!(original.current(), Ok(TokenKind::Ident("y")));
-        assert_eq!(clone.current(), Ok(TokenKind::Ident("x")));
+        assert_eq!(original.current(), Ok(Kind::Ident("y")));
+        assert_eq!(clone.current(), Ok(Kind::Ident("x")));
 
         // And vice versa.
         clone.advance_unchecked();
-        assert_eq!(clone.current(), Ok(TokenKind::Ident("y")));
+        assert_eq!(clone.current(), Ok(Kind::Ident("y")));
     }
 }

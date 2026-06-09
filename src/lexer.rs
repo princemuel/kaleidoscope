@@ -1,6 +1,6 @@
 use core::iter::FusedIterator;
 
-use crate::token::{Span, Token, TokenKind};
+use crate::token::{Kind, Span, Token};
 
 /// Transforms a source string into a stream of [`Token`]s.
 #[derive(Clone, Debug)]
@@ -22,7 +22,7 @@ impl<'a> Lexer<'a> {
         let start = self.cursor;
 
         let Some(ch) = self.peek() else {
-            return self.simple(TokenKind::Eof, start);
+            return self.simple(Kind::Eof, start);
         };
 
         self.advance(); // consume the leading byte
@@ -30,12 +30,12 @@ impl<'a> Lexer<'a> {
         match ch {
             b'#' => {
                 self.advance_while(|b| b != b'\n' && b != b'\r');
-                self.simple(TokenKind::Comment, start)
+                self.simple(Kind::Comment, start)
             }
 
-            b',' => self.simple(TokenKind::Comma, start),
-            b'(' => self.simple(TokenKind::LParen, start),
-            b')' => self.simple(TokenKind::RParen, start),
+            b',' => self.simple(Kind::Comma, start),
+            b'(' => self.simple(Kind::LParen, start),
+            b')' => self.simple(Kind::RParen, start),
 
             // Identifiers and keywords: [a-zA-Z_][a-zA-Z0-9_]*
             b if b.is_ascii_alphabetic() || b == b'_' => {
@@ -43,17 +43,17 @@ impl<'a> Lexer<'a> {
 
                 let lexeme = self.slice(start);
                 let kind = match lexeme {
-                    "def" => TokenKind::Def,
-                    "extern" => TokenKind::Extern,
-                    "if" => TokenKind::If,
-                    "then" => TokenKind::Then,
-                    "else" => TokenKind::Else,
-                    "for" => TokenKind::For,
-                    "in" => TokenKind::In,
-                    "unary" => TokenKind::Unary,
-                    "binary" => TokenKind::Binary,
-                    "var" => TokenKind::Var,
-                    _ => TokenKind::Ident(lexeme),
+                    "def" => Kind::Def,
+                    "extern" => Kind::Extern,
+                    "if" => Kind::If,
+                    "then" => Kind::Then,
+                    "else" => Kind::Else,
+                    "for" => Kind::For,
+                    "in" => Kind::In,
+                    "unary" => Kind::Unary,
+                    "binary" => Kind::Binary,
+                    "var" => Kind::Var,
+                    _ => Kind::Ident(lexeme),
                 };
                 self.simple(kind, start)
             }
@@ -61,8 +61,7 @@ impl<'a> Lexer<'a> {
             b if b.is_ascii_digit() => {
                 self.advance_while(|b| b.is_ascii_digit());
 
-                if self.peek() == Some(b'.')
-                    && self.peek_ahead(1).is_some_and(|b| b.is_ascii_digit())
+                if self.peek() == Some(b'.') && self.peek_nth(1).is_some_and(|b| b.is_ascii_digit())
                 {
                     self.advance(); // consume '.'
                     self.advance_while(|b| b.is_ascii_digit());
@@ -70,8 +69,8 @@ impl<'a> Lexer<'a> {
 
                 let lexeme = self.slice(start);
                 let kind = match lexeme.parse() {
-                    Ok(n) => TokenKind::Number(n),
-                    Err(_) => TokenKind::Invalid(lexeme),
+                    Ok(n) => Kind::Number(n),
+                    Err(_) => Kind::Invalid(lexeme),
                 };
                 self.simple(kind, start)
             }
@@ -81,38 +80,43 @@ impl<'a> Lexer<'a> {
                     self.advance_while(|b| b.is_ascii_digit());
                     let lexeme = self.slice(start);
                     let kind = match lexeme.parse() {
-                        Ok(n) => TokenKind::Number(n),
-                        Err(_) => TokenKind::Invalid(lexeme),
+                        Ok(n) => Kind::Number(n),
+                        Err(_) => Kind::Invalid(lexeme),
                     };
                     self.simple(kind, start)
                 } else {
-                    self.simple(TokenKind::Op('.'), start)
+                    self.simple(Kind::Op('.'), start)
                 }
             }
 
-            b => self.simple(TokenKind::Op(char::from(b)), start),
+            b => self.simple(Kind::Op(char::from(b)), start),
         }
     }
 
-    fn simple(&self, kind: TokenKind<'a>, start: usize) -> Token<'a> {
+    fn simple(&self, kind: Kind<'a>, start: usize) -> Token<'a> {
         Token { kind, span: self.span(start) }
     }
 }
 
 impl<'a> Lexer<'a> {
     #[inline]
-    fn peek(&self) -> Option<u8> { self.peek_ahead(0) }
+    fn peek(&self) -> Option<u8> { self.peek_nth(0) }
 
     #[inline]
-    fn peek_ahead(&self, n: usize) -> Option<u8> {
+    fn peek_nth(&self, n: usize) -> Option<u8> {
         self.source.as_bytes().get(self.cursor + n).copied()
     }
 
     #[inline]
     fn advance(&mut self) { self.cursor += 1; }
 
-    fn advance_while(&mut self, mut predicate: impl FnMut(u8) -> bool) {
-        while self.peek().is_some_and(&mut predicate) {
+    #[inline]
+    fn advance_while<P>(&mut self, predicate: P)
+    where
+        Self: Sized,
+        P: Fn(u8) -> bool,
+    {
+        while self.peek().is_some_and(&predicate) {
             self.advance();
         }
     }
@@ -132,8 +136,8 @@ impl<'a> Iterator for Lexer<'a> {
         loop {
             let token = self.lex_next();
             match token.kind {
-                TokenKind::Eof => return None,
-                TokenKind::Comment => {}
+                Kind::Eof => return None,
+                Kind::Comment => {}
                 _ => return Some(token),
             }
         }
@@ -153,7 +157,7 @@ impl<'a> Lexer<'a> {
 }
 
 impl<'a> Iterator for TokenKinds<'a> {
-    type Item = TokenKind<'a>;
+    type Item = Kind<'a>;
 
     fn next(&mut self) -> Option<Self::Item> { self.0.next().map(|t| t.kind) }
 }
@@ -168,7 +172,7 @@ mod tests {
 
     /// Collect all `TokenKind`s from a source string, comments and EOF
     /// excluded.
-    fn tokenize(src: &str) -> Vec<TokenKind<'_>> { Lexer::new(src).tokens().collect() }
+    fn tokenize(src: &str) -> Vec<Kind<'_>> { Lexer::new(src).tokens().collect() }
 
     /// Collect full `Token`s (kind + span) from a source string.
     fn tokenize_full(src: &str) -> Vec<Token<'_>> { Lexer::new(src).collect() }
@@ -205,13 +209,13 @@ mod tests {
 
     #[test]
     fn comment_skipped_before_token() {
-        single!("# comment\ndef", TokenKind::Def);
+        single!("# comment\ndef", Kind::Def);
     }
 
     #[test]
     fn comment_skipped_after_token() {
         let tokens = tokenize("def # comment");
-        assert_eq!(tokens, vec![TokenKind::Def]);
+        assert_eq!(tokens, vec![Kind::Def]);
     }
 
     #[test]
@@ -219,147 +223,147 @@ mod tests {
         // Tokens after the newline following a comment must still be lexed.
         let tokens = tokenize("# line one\ndef foo");
         assert_eq!(tokens.len(), 2);
-        assert_matches!(tokens[0], TokenKind::Def);
-        assert_matches!(tokens[1], TokenKind::Ident("foo"));
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("foo"));
     }
 
     #[test]
     fn multiple_comments_all_skipped() {
         let tokens = tokenize("# one\n# two\n# three\nextern");
-        assert_eq!(tokens, vec![TokenKind::Extern]);
+        assert_eq!(tokens, vec![Kind::Extern]);
     }
 
     #[test]
     fn keyword_def() {
-        single!("def", TokenKind::Def);
+        single!("def", Kind::Def);
     }
 
     #[test]
     fn keyword_extern() {
-        single!("extern", TokenKind::Extern);
+        single!("extern", Kind::Extern);
     }
 
     #[test]
     fn keyword_if() {
-        single!("if", TokenKind::If);
+        single!("if", Kind::If);
     }
 
     #[test]
     fn keyword_then() {
-        single!("then", TokenKind::Then);
+        single!("then", Kind::Then);
     }
 
     #[test]
     fn keyword_else() {
-        single!("else", TokenKind::Else);
+        single!("else", Kind::Else);
     }
 
     #[test]
     fn keyword_for() {
-        single!("for", TokenKind::For);
+        single!("for", Kind::For);
     }
 
     #[test]
     fn keyword_in() {
-        single!("in", TokenKind::In);
+        single!("in", Kind::In);
     }
 
     #[test]
     fn keyword_unary() {
-        single!("unary", TokenKind::Unary);
+        single!("unary", Kind::Unary);
     }
 
     #[test]
     fn keyword_binary() {
-        single!("binary", TokenKind::Binary);
+        single!("binary", Kind::Binary);
     }
 
     #[test]
     fn keyword_var() {
-        single!("var", TokenKind::Var);
+        single!("var", Kind::Var);
     }
 
     #[test]
     fn keyword_prefix_is_ident_not_keyword() {
         // "define" starts with "def" but is not the keyword.
-        single!("define", TokenKind::Ident("define"));
+        single!("define", Kind::Ident("define"));
     }
 
     #[test]
     fn keyword_suffix_is_ident_not_keyword() {
         // "ndef" ends with "def" but is an identifier.
-        single!("ndef", TokenKind::Ident("ndef"));
+        single!("ndef", Kind::Ident("ndef"));
     }
 
     #[test]
     fn ident_simple() {
-        single!("foo", TokenKind::Ident("foo"));
+        single!("foo", Kind::Ident("foo"));
     }
 
     #[test]
     fn ident_with_digits() {
-        single!("x1", TokenKind::Ident("x1"));
+        single!("x1", Kind::Ident("x1"));
     }
 
     #[test]
     fn ident_with_underscores() {
-        single!("my_var", TokenKind::Ident("my_var"));
+        single!("my_var", Kind::Ident("my_var"));
     }
 
     #[test]
     fn ident_leading_underscore() {
-        single!("_private", TokenKind::Ident("_private"));
+        single!("_private", Kind::Ident("_private"));
     }
 
     #[test]
     fn ident_all_caps() {
-        single!("FOO", TokenKind::Ident("FOO"));
+        single!("FOO", Kind::Ident("FOO"));
     }
 
     #[test]
     fn ident_mixed_case() {
-        single!("camelCase", TokenKind::Ident("camelCase"));
+        single!("camelCase", Kind::Ident("camelCase"));
     }
 
     #[test]
     fn ident_does_not_consume_following_op() {
         let tokens = tokenize("x+y");
         assert_eq!(tokens.len(), 3);
-        assert_matches!(tokens[0], TokenKind::Ident("x"));
-        assert_matches!(tokens[1], TokenKind::Op('+'));
-        assert_matches!(tokens[2], TokenKind::Ident("y"));
+        assert_matches!(tokens[0], Kind::Ident("x"));
+        assert_matches!(tokens[1], Kind::Op('+'));
+        assert_matches!(tokens[2], Kind::Ident("y"));
     }
 
     #[test]
     fn number_integer() {
-        single!("42", TokenKind::Number(42.0));
+        single!("42", Kind::Number(42.0));
     }
 
     #[test]
     fn number_zero() {
-        single!("0", TokenKind::Number(0.0));
+        single!("0", Kind::Number(0.0));
     }
 
     #[test]
     #[expect(clippy::approx_constant)]
     fn number_float() {
-        single!("3.14", TokenKind::Number(v) if (v - 3.14).abs() < f64::EPSILON);
+        single!("3.14", Kind::Number(v) if (v - 3.14).abs() < f64::EPSILON);
     }
 
     #[test]
     fn number_float_leading_zero() {
-        single!("0.5", TokenKind::Number(v) if (v - 0.5).abs() < f64::EPSILON);
+        single!("0.5", Kind::Number(v) if (v - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn number_dot_led_float() {
         // C++ parses ".4" as 0.4; we must match that behaviour.
-        single!(".4", TokenKind::Number(v) if (v - 0.4).abs() < f64::EPSILON);
+        single!(".4", Kind::Number(v) if (v - 0.4).abs() < f64::EPSILON);
     }
 
     #[test]
     fn number_dot_led_float_zero() {
-        single!(".0", TokenKind::Number(v) if v == 0.0);
+        single!(".0", Kind::Number(v) if v == 0.0);
     }
 
     #[test]
@@ -368,97 +372,97 @@ mod tests {
         // because no digit follows it.
         let tokens = tokenize("1.");
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0], TokenKind::Number(1.0));
-        assert_eq!(tokens[1], TokenKind::Op('.'));
+        assert_eq!(tokens[0], Kind::Number(1.0));
+        assert_eq!(tokens[1], Kind::Op('.'));
     }
 
     #[test]
     fn lone_dot_is_op() {
         // A bare '.' with no trailing digit is an operator, not a number.
-        single!(".", TokenKind::Op('.'));
+        single!(".", Kind::Op('.'));
     }
 
     #[test]
     fn number_does_not_consume_following_op() {
         let tokens = tokenize("4+5");
         assert_eq!(tokens.len(), 3);
-        assert_matches!(tokens[0], TokenKind::Number(4.0));
-        assert_matches!(tokens[1], TokenKind::Op('+'));
-        assert_matches!(tokens[2], TokenKind::Number(5.0));
+        assert_matches!(tokens[0], Kind::Number(4.0));
+        assert_matches!(tokens[1], Kind::Op('+'));
+        assert_matches!(tokens[2], Kind::Number(5.0));
     }
 
     #[test]
     fn number_large_integer() {
-        single!("9999999", TokenKind::Number(9_999_999.0));
+        single!("9999999", Kind::Number(9_999_999.0));
     }
 
     #[test]
     fn punct_lparen() {
-        single!("(", TokenKind::LParen);
+        single!("(", Kind::LParen);
     }
 
     #[test]
     fn punct_rparen() {
-        single!(")", TokenKind::RParen);
+        single!(")", Kind::RParen);
     }
 
     #[test]
     fn punct_comma() {
-        single!(",", TokenKind::Comma);
+        single!(",", Kind::Comma);
     }
 
     #[test]
     fn op_plus() {
-        single!("+", TokenKind::Op('+'));
+        single!("+", Kind::Op('+'));
     }
 
     #[test]
     fn op_minus() {
-        single!("-", TokenKind::Op('-'));
+        single!("-", Kind::Op('-'));
     }
 
     #[test]
     fn op_star() {
-        single!("*", TokenKind::Op('*'));
+        single!("*", Kind::Op('*'));
     }
 
     #[test]
     fn op_slash() {
-        single!("/", TokenKind::Op('/'));
+        single!("/", Kind::Op('/'));
     }
 
     #[test]
     fn op_lt() {
-        single!("<", TokenKind::Op('<'));
+        single!("<", Kind::Op('<'));
     }
 
     #[test]
     fn op_gt() {
-        single!(">", TokenKind::Op('>'));
+        single!(">", Kind::Op('>'));
     }
 
     #[test]
     fn op_equals() {
-        single!("=", TokenKind::Op('='));
+        single!("=", Kind::Op('='));
     }
 
     #[test]
     fn op_semicolon() {
-        single!(";", TokenKind::Op(';'));
+        single!(";", Kind::Op(';'));
     }
 
     #[test]
     fn def_with_two_params_and_body() {
         let tokens = tokenize("def foo(x y) x+y");
         assert_eq!(tokens.len(), 9);
-        assert_matches!(tokens[0], TokenKind::Def);
-        assert_matches!(tokens[1], TokenKind::Ident("foo"));
-        assert_matches!(tokens[2], TokenKind::LParen);
-        assert_matches!(tokens[3], TokenKind::Ident("x"));
-        assert_matches!(tokens[4], TokenKind::Ident("y"));
-        assert_matches!(tokens[5], TokenKind::RParen);
-        assert_matches!(tokens[6], TokenKind::Ident("x"));
-        assert_matches!(tokens[7], TokenKind::Op('+'));
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("foo"));
+        assert_matches!(tokens[2], Kind::LParen);
+        assert_matches!(tokens[3], Kind::Ident("x"));
+        assert_matches!(tokens[4], Kind::Ident("y"));
+        assert_matches!(tokens[5], Kind::RParen);
+        assert_matches!(tokens[6], Kind::Ident("x"));
+        assert_matches!(tokens[7], Kind::Op('+'));
         // 'y' at position 8 follows
     }
 
@@ -467,55 +471,55 @@ mod tests {
         // "def foo(x y) x+y y;" — two dispatches from one line.
         let tokens = tokenize("def foo(x y) x+y y;");
         assert_eq!(tokens.len(), 11);
-        assert_matches!(tokens[10], TokenKind::Op(';'));
+        assert_matches!(tokens[10], Kind::Op(';'));
     }
 
     #[test]
     fn call_with_float_arg() {
         let tokens = tokenize("foo(y, 4.0)");
         assert_eq!(tokens.len(), 6);
-        assert_matches!(tokens[0], TokenKind::Ident("foo"));
-        assert_matches!(tokens[1], TokenKind::LParen);
-        assert_matches!(tokens[2], TokenKind::Ident("y"));
-        assert_matches!(tokens[3], TokenKind::Comma);
-        assert_matches!(tokens[4], TokenKind::Number(4.0));
-        assert_matches!(tokens[5], TokenKind::RParen);
+        assert_matches!(tokens[0], Kind::Ident("foo"));
+        assert_matches!(tokens[1], Kind::LParen);
+        assert_matches!(tokens[2], Kind::Ident("y"));
+        assert_matches!(tokens[3], Kind::Comma);
+        assert_matches!(tokens[4], Kind::Number(4.0));
+        assert_matches!(tokens[5], Kind::RParen);
     }
 
     #[test]
     fn extern_declaration() {
         let tokens = tokenize("extern sin(a);");
         assert_eq!(tokens.len(), 6);
-        assert_matches!(tokens[0], TokenKind::Extern);
-        assert_matches!(tokens[1], TokenKind::Ident("sin"));
-        assert_matches!(tokens[2], TokenKind::LParen);
-        assert_matches!(tokens[3], TokenKind::Ident("a"));
-        assert_matches!(tokens[4], TokenKind::RParen);
+        assert_matches!(tokens[0], Kind::Extern);
+        assert_matches!(tokens[1], Kind::Ident("sin"));
+        assert_matches!(tokens[2], Kind::LParen);
+        assert_matches!(tokens[3], Kind::Ident("a"));
+        assert_matches!(tokens[4], Kind::RParen);
     }
 
     #[test]
     fn multiline_input() {
         let src = "def fib(x)\n  x + 1";
         let tokens = tokenize(src);
-        assert_matches!(tokens[0], TokenKind::Def);
-        assert_matches!(tokens[1], TokenKind::Ident("fib"));
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("fib"));
         // The newline is just whitespace. no extra tokens emitted.
-        assert_matches!(tokens[5], TokenKind::Ident("x"));
-        assert_matches!(tokens[6], TokenKind::Op('+'));
-        assert_matches!(tokens[7], TokenKind::Number(1.0));
+        assert_matches!(tokens[5], Kind::Ident("x"));
+        assert_matches!(tokens[6], Kind::Op('+'));
+        assert_matches!(tokens[7], Kind::Number(1.0));
     }
 
     #[test]
     fn fibonacci_function() {
         let src = "def fib(x) if x < 3 then 1 else fib(x-1)+fib(x-2)";
         let tokens = tokenize(src);
-        assert_matches!(tokens[0], TokenKind::Def);
-        assert_matches!(tokens[1], TokenKind::Ident("fib"));
-        assert_matches!(tokens[5], TokenKind::If);
-        assert_matches!(tokens[7], TokenKind::Op('<'));
-        assert_matches!(tokens[9], TokenKind::Then);
-        assert_matches!(tokens[11], TokenKind::Else);
-        assert_matches!(tokens[12], TokenKind::Ident("fib"));
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("fib"));
+        assert_matches!(tokens[5], Kind::If);
+        assert_matches!(tokens[7], Kind::Op('<'));
+        assert_matches!(tokens[9], Kind::Then);
+        assert_matches!(tokens[11], Kind::Else);
+        assert_matches!(tokens[12], Kind::Ident("fib"));
     }
 
     #[test]
@@ -578,7 +582,7 @@ mod tests {
         // The TokenKinds wrapper must never yield Comment.
         let kinds = Lexer::new("# comment\nfoo # another\nbar").tokens();
         for kind in kinds {
-            assert_ne!(kind, TokenKind::Comment);
+            assert_ne!(kind, Kind::Comment);
         }
     }
 
@@ -587,7 +591,7 @@ mod tests {
         // The Token iterator (with spans) must also skip comments.
         let tokens: Vec<_> = Lexer::new("# comment\nfoo").collect();
         assert_eq!(tokens.len(), 1);
-        assert_matches!(tokens[0].kind, TokenKind::Ident("foo"));
+        assert_matches!(tokens[0].kind, Kind::Ident("foo"));
     }
 
     #[test]
