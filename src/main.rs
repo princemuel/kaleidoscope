@@ -1,12 +1,13 @@
+#![expect(unsafe_code)]
 use std::collections::HashMap;
 use std::io;
 use std::io::prelude::*;
 
+use inkwell::OptimizationLevel;
 use inkwell::context::Context;
-use inkwell::targets::{InitializationConfig, Target};
-use klyd::error::CodegenError;
-use klyd::token::TokenKind;
-use klyd::{Codegen, Error, Lexer, Parser};
+use kcc::codegen::SymbolTable;
+use kcc::token::Kind;
+use kcc::{CodeGen, Error, Lexer, Parser};
 
 /// Binary-operator precedence table.
 const PRECEDENCE_OPS: [(char, u8); 6] =
@@ -15,20 +16,53 @@ const PRECEDENCE_OPS: [(char, u8); 6] =
 /// Print a prompt and flush stderr immediately, matching C++'s `fprintf(stderr,
 /// "ready> ")`.
 macro_rules! prompt {
-    () => {{
-        eprint!("ready> ");
-        io::stderr().flush().expect("failed to flush stdout");
-    }};
+     ( $( $x:expr ),* ) => {
+        eprint!( $($x, )* );
+        std::io::stderr().flush().expect("failed to flush stdout");
+    };
 }
+
+#[unsafe(no_mangle)]
+pub extern "C" fn putchard(x: f64) -> f64 {
+    // let x = unsafe { x.abs().to_int_unchecked::<u8>() };
+    #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let c = char::from(x.round().abs() as u8);
+    prompt!("{c}");
+    x
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn printd(x: f64) -> f64 {
+    println!("{x}");
+    x
+}
+
+// Add the fns above to a global array, so Rust compiler won't remove them.
+pub static EXTERN_FNS: [extern "C" fn(f64) -> f64; 2] = [putchard, printd];
 
 fn main() -> Result<(), Error> {
     let stdin = io::stdin();
-    prompt!();
+    prompt!(">>> ");
 
-    // Make the module, which holds all the code.
-    Target::initialize_native(&InitializationConfig::default()).map_err(CodegenError::Unknown)?;
     let context = Context::create();
-    let mut codegen = Codegen::new("my cool jit", &context);
+
+    let module = context.create_module("kcc");
+    // module.run_passes(passes, machine, options)
+
+    let engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)?;
+    let target_data = engine.get_target_data();
+    let data_layout = target_data.get_data_layout();
+
+    module.set_data_layout(&data_layout);
+
+    let mut codegen = CodeGen {
+        context: &context,
+        module,
+        builder: context.create_builder(),
+        engine,
+        symbols: SymbolTable::default(),
+    };
+
     let prec = HashMap::from(PRECEDENCE_OPS);
 
     for line in stdin.lock().lines() {
@@ -47,7 +81,7 @@ fn main() -> Result<(), Error> {
 
         // An empty token list (blank line or comment-only) — just re-prompt.
         if tokens.is_empty() {
-            prompt!();
+            prompt!(">>> ");
             continue;
         }
 
@@ -60,12 +94,12 @@ fn main() -> Result<(), Error> {
                 Err(_) => break,
 
                 // Semicolons are statement separators; skip silently.
-                Ok(TokenKind::Op(';')) => {
+                Ok(Kind::Op(';')) => {
                     parser.advance_unchecked();
                 }
 
-                Ok(TokenKind::Def) => handle_definition(&mut parser, &mut codegen),
-                Ok(TokenKind::Extern) => handle_extern(&mut parser, &mut codegen),
+                Ok(Kind::Def) => handle_definition(&mut parser, &mut codegen),
+                Ok(Kind::Extern) => handle_extern(&mut parser, &mut codegen),
 
                 // Any other token: treat as a top-level expression.
                 _ => handle_toplevel_expr(&mut parser, &mut codegen),
@@ -76,7 +110,7 @@ fn main() -> Result<(), Error> {
         // This matches C++: the prompt is printed at the *top* of MainLoop's
         // while(true) body, i.e. before each new dispatch, which from the
         // user's perspective means "after the previous output".
-        prompt!();
+        prompt!(">>> ");
     }
 
     // Print out all of the generated code.
@@ -89,14 +123,14 @@ fn main() -> Result<(), Error> {
 // matching the C++ version.
 
 /// Handle a `def` — parse a function definition and report success or failure.
-fn handle_definition(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
+fn handle_definition(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
     match parser.parse_definition() {
-        Ok(func) => match codegen.function(&func) {
+        Ok(func) => match codegen.func(&func) {
             Ok(fn_val) => {
                 eprintln!("Read function definition:");
                 fn_val.print_to_stderr();
             }
-            Err(e) => eprintln!("Codegen error: {e}"),
+            Err(e) => eprintln!("Error: {e}"),
         },
         Err(e) => {
             eprintln!("Error in definition: {e}");
@@ -106,14 +140,14 @@ fn handle_definition(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
 }
 
 /// Handle an `extern` declaration.
-fn handle_extern(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
+fn handle_extern(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
     match parser.parse_extern() {
         Ok(func) => match codegen.proto(&func.proto) {
             Ok(proto) => {
                 eprintln!("Read extern: ");
                 proto.print_to_stderr();
             }
-            Err(e) => eprintln!("Codegen error: {e}"),
+            Err(e) => eprintln!("Error: {e}"),
         },
         Err(e) => {
             eprintln!("Error parsing extern: {e}");
@@ -122,9 +156,9 @@ fn handle_extern(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
     }
 }
 /// Handle a top-level expression.
-fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
+fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
     match parser.parse_toplevel_expr() {
-        Ok(func) => match codegen.function(&func) {
+        Ok(func) => match codegen.func(&func) {
             Ok(fn_val) => {
                 eprintln!("Read top-level expression:");
                 fn_val.print_to_stderr();
@@ -134,7 +168,7 @@ fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut Codegen<'_>) {
                     fn_val.delete();
                 };
             }
-            Err(e) => eprintln!("Codegen error: {e}"),
+            Err(e) => eprintln!("Error: {e}"),
         },
         Err(e) => {
             eprintln!("Error: {e}");
