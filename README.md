@@ -1,8 +1,8 @@
 # Kaleidoscope 
 
-A Rust port of [llvm's kaleidoscope language tutorial][tutorial]. 
+An implementation of [llvm's C++ kaleidoscope language tutorial][tutorial] in Rust. 
 
-This is an implementation of a small functional language,
+Kaleidoscope is a small functional language,
 built chapter by chapter alongside the original C++ reference.
 
 The goal is not just to translate the C++ but to implement each stage
