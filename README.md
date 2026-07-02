@@ -1,12 +1,13 @@
-# LLVM's Kaleidoscope language In Rust: kaleidoscope
+# Kaleidoscope 
 
-A Rust port of the [LLVM Kaleidoscope tutorial][tutorial]. This is a from-scratch
-implementation of a small functional language, built chapter by chapter
-alongside the original C++ reference.
+A Rust port of [llvm's kaleidoscope language tutorial][tutorial]. 
+
+This is an implementation of a small functional language,
+built chapter by chapter alongside the original C++ reference.
 
 The goal is not just to translate the C++ but to implement each stage
 idiomatically in Rust: zero-copy lexing, sum-type AST, structured errors,
-and safe(ish) LLVM bindings via [inkwell][inkwell] making use of Rust's inherent safety and expressiveness.
+and safe(ish) LLVM bindings via [inkwell][inkwell], making use of Rust's inherent safety and expressiveness.
 
 ## Language overview
 

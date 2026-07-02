@@ -5,7 +5,8 @@ use std::io::prelude::*;
 
 use inkwell::OptimizationLevel;
 use inkwell::context::Context;
-use kcc::codegen::SymbolTable;
+use inkwell::targets::{InitializationConfig, Target};
+use kcc::codegen::{ANON_FN, SymbolTable};
 use kcc::token::Kind;
 use kcc::{CodeGen, Error, Lexer, Parser};
 
@@ -43,6 +44,8 @@ pub static EXTERN_FNS: [extern "C" fn(f64) -> f64; 2] = [putchard, printd];
 fn main() -> Result<(), Error> {
     let stdin = io::stdin();
     prompt!(">>> ");
+
+    Target::initialize_native(&InitializationConfig::default()).map_err(Error::Unknown)?;
 
     let context = Context::create();
 
@@ -155,18 +158,19 @@ fn handle_extern(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
         }
     }
 }
-/// Handle a top-level expression.
+
+/// Handle a top-level expression: codegen, optimize, JIT-execute, print result.
 fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
     match parser.parse_toplevel_expr() {
         Ok(func) => match codegen.func(&func) {
             Ok(fn_val) => {
                 eprintln!("Read top-level expression:");
                 fn_val.print_to_stderr();
-                // erase so it doesn't conflict on the next top-level expr
-                #[expect(unsafe_code)]
-                unsafe {
-                    fn_val.delete();
-                };
+
+                match codegen.run_anon(fn_val) {
+                    Ok(result) => eprintln!("Evaluated to {result}"),
+                    Err(e) => eprintln!("Error executing: {e}"),
+                }
             }
             Err(e) => eprintln!("Error: {e}"),
         },

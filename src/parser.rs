@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
 use crate::ast::{Expr, Function, Prototype};
+use crate::codegen::ANON_FN;
 use crate::error::ParseError;
 use crate::token::Kind;
-
-/// the synthetic prototype wrapping a top-level expression.
-const ANON_FN: &str = "__anon_expr";
 
 /// A recursive-descent / Pratt parser for the Kaleidoscope language
 #[derive(Clone, Debug)]

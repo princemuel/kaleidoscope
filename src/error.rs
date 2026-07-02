@@ -16,6 +16,9 @@ pub enum Error {
 
     #[error(transparent)]
     Parser(#[from] ParseError),
+
+    #[error("{0}")]
+    Unknown(String),
 }
 
 #[derive(Debug, ThisError)]
@@ -40,6 +43,9 @@ pub enum CodegenError {
 
     #[error(transparent)]
     Builder(#[from] BuilderError),
+
+    #[error(transparent)]
+    LLVMString(#[from] LLVMString),
 
     #[error("{0}")]
     Unknown(String),

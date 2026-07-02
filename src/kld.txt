@@ -1,0 +1,2504 @@
+//! The Kaleidoscope Abstract Syntax Tree (aka Parse Tree)
+
+/// Every expression form the language can produce.
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq)]
+pub enum Expr {
+    /// A binary operation: `lhs op rhs`.
+    Binary { op: char, lhs: Box<Expr>, rhs: Box<Expr> },
+    /// A function call: `name(...args)`.
+    Call { name: String, args: Vec<Expr> },
+    /// A numeric literal: `1`, `3.14`, etc.
+    Number(f64),
+    /// A variable reference: `x`, `foo`, etc.
+    Variable(String),
+}
+
+/// The prototype (signature) of a function: its name and parameter names.
+///
+/// An `extern` declaration has a `Prototype` but no body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Prototype {
+    pub name: String,
+    pub args: Vec<String>,
+}
+
+/// A function. can be either a definition (with body) or an extern
+/// (without).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Function {
+    pub proto: Prototype,
+    pub body: Option<Expr>,
+}
+use core::iter;
+use std::collections::HashMap;
+
+use inkwell::FloatPredicate;
+use inkwell::builder::Builder;
+use inkwell::context::Context;
+use inkwell::execution_engine::ExecutionEngine;
+use inkwell::module::Module;
+use inkwell::values::{FloatValue, FunctionValue};
+
+use crate::ast::{Expr, Function, Prototype};
+use crate::error::CodegenError;
+
+pub type SymbolTable<'ctx> = HashMap<String, FloatValue<'ctx>>;
+
+pub struct CodeGen<'ctx> {
+    pub context: &'ctx Context,
+    /// helper object that makes it easy to generate LLVM instructions
+    pub builder: Builder<'ctx>,
+    /// top-level structure the LLVM IR uses to contain code
+    pub module: Module<'ctx>,
+    /// the
+    pub engine: ExecutionEngine<'ctx>,
+    /// the symbol table for the code aka `NamedValues`
+    pub symbols: SymbolTable<'ctx>,
+}
+
+impl<'ctx> CodeGen<'ctx> {
+    pub fn func(&mut self, func: &Function) -> Result<FunctionValue<'ctx>, CodegenError> {
+        let proto = &func.proto;
+
+        let fn_val = match self.module.get_function(&proto.name) {
+            Some(existing) => {
+                let actual = proto.args.len();
+                #[expect(clippy::as_conversions)]
+                let expected = existing.count_params() as usize;
+
+                // Validate arity matches
+                if expected != actual {
+                    return Err(CodegenError::ArgCountMismatch { expected, got: actual });
+                }
+                // Reject if already has a body i.e redefinition
+                if existing.count_basic_blocks() > 0 {
+                    return Err(CodegenError::FunctionRedefinition(proto.name.clone()));
+                }
+
+                existing
+            }
+            None => self.proto(proto)?,
+        };
+
+        // no block or no builder setup needed for extern declarations
+        let Some(body) = &func.body else { return Ok(fn_val) };
+
+        let entry = self.context.append_basic_block(fn_val, "entry");
+        self.builder.position_at_end(entry);
+
+        // Record the function arguments in the SymbolsTable map.
+        self.symbols.clear();
+        for (param, name) in fn_val.get_param_iter().zip(proto.args.iter()) {
+            param.into_float_value().set_name(name);
+            self.symbols.insert(name.clone(), param.into_float_value());
+        }
+
+        // Clean up and propagate on either codegen failure or verification failure.
+        let result = (|| -> Result<_, CodegenError> {
+            let ret = self.expr(body)?;
+            self.builder.build_return(Some(&ret))?;
+
+            if !fn_val.verify(true) {
+                return Err(CodegenError::VerificationFailed(proto.name.clone()));
+            }
+
+            Ok(fn_val)
+        })();
+
+        if result.is_err() {
+            #[expect(unsafe_code)]
+            unsafe {
+                fn_val.delete();
+            };
+        }
+
+        self.symbols.clear();
+        result
+    }
+
+    /// Compiles the specified `Prototype` into an extern LLVM `FunctionValue`.
+    pub fn proto(&self, proto: &Prototype) -> Result<FunctionValue<'ctx>, CodegenError> {
+        // Make the function type:  double(double,double) etc.
+        let r#type = self.context.f64_type();
+        let types: Vec<_> = iter::repeat_n(r#type, proto.args.len()).map(Into::into).collect();
+
+        let fn_type = self.context.f64_type().fn_type(&types, false);
+        let fn_val = self.module.add_function(proto.name.as_str(), fn_type, None);
+
+        Ok(fn_val)
+    }
+
+    pub fn expr(&mut self, expr: &Expr) -> Result<FloatValue<'ctx>, CodegenError> {
+        match expr {
+            Expr::Number(n) => Ok(self.context.f64_type().const_float(*n)),
+
+            Expr::Variable(name) => self
+                .symbols
+                .get(name)
+                .copied()
+                .ok_or_else(|| CodegenError::UnknownVariable(name.to_owned())),
+
+            Expr::Binary { op, lhs, rhs } => {
+                let op = *op;
+                let lhs = self.expr(lhs)?;
+                let rhs = self.expr(rhs)?;
+
+                match op {
+                    '+' => Ok(self.builder.build_float_add(lhs, rhs, "addtmp")?),
+                    '-' => Ok(self.builder.build_float_sub(lhs, rhs, "subtmp")?),
+                    '*' => Ok(self.builder.build_float_mul(lhs, rhs, "multmp")?),
+                    '/' => Ok(self.builder.build_float_div(lhs, rhs, "divtmp")?),
+                    '<' | '>' => {
+                        let (lhs, rhs) = if op == '<' { (lhs, rhs) } else { (rhs, lhs) };
+
+                        let cmp = self.builder.build_float_compare(
+                            FloatPredicate::ULT,
+                            lhs,
+                            rhs,
+                            "cmptmp",
+                        )?;
+
+                        Ok(self.builder.build_unsigned_int_to_float(
+                            cmp,
+                            self.context.f64_type(),
+                            "booltmp",
+                        )?)
+                    }
+                    _ => Err(CodegenError::InvalidBinaryOp(op)),
+                }
+            }
+
+            Expr::Call { name, args } => {
+                let callee = self
+                    .module
+                    .get_function(name)
+                    .ok_or_else(|| CodegenError::UnknownFunction(name.to_owned()))?;
+
+                let actual = args.len();
+                #[expect(clippy::as_conversions)]
+                let expected = callee.count_params() as usize;
+
+                if expected != actual {
+                    return Err(CodegenError::ArgCountMismatch { expected, got: actual });
+                }
+
+                let compiled_args = args
+                    .iter()
+                    .map(|arg| self.expr(arg).map(Into::into))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let call = self.builder.build_call(callee, &compiled_args, "calltmp")?;
+
+                Ok(call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| CodegenError::UnknownFunction(name.to_owned()))?
+                    .into_float_value())
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::assert_matches;
+
+    use super::*;
+
+    /// Construct a fresh `Codegen` tied to the provided `Context`.
+    /// Every test that needs a `Codegen` calls this so the context lifetime
+    /// is owned by the test frame, not by the codegen struct.
+    fn make_codegen(ctx: &Context) -> CodeGen<'_> {
+        let module = ctx.create_module("test_module");
+        let builder = ctx.create_builder();
+        let engine = module.create_execution_engine().unwrap();
+        let target_data = engine.get_target_data();
+        let data_layout = target_data.get_data_layout();
+        module.set_data_layout(&data_layout);
+
+        CodeGen { context: ctx, builder, module, engine, symbols: SymbolTable::default() }
+    }
+
+    /// Build a `Prototype` with the given name and argument names.
+    fn proto(name: &str, args: &[&str]) -> Prototype {
+        Prototype { name: name.to_owned(), args: args.iter().map(ToString::to_string).collect() }
+    }
+
+    /// Build a `Function` definition (with body).
+    fn func(name: &str, args: &[&str], body: Expr) -> Function {
+        Function { proto: proto(name, args), body: Some(body) }
+    }
+
+    /// Build an extern `Function` (no body).
+    fn extern_func(name: &str, args: &[&str]) -> Function {
+        Function { proto: proto(name, args), body: None }
+    }
+
+    /// `Expr::Number` shorthand for a float literal.
+    fn num(v: f64) -> Expr { Expr::Number(v) }
+
+    /// `Expr::Variable` shorthand.
+    fn var(name: &str) -> Expr { Expr::Variable(name.to_owned()) }
+
+    /// `Expr::Binary` shorthand.
+    fn binop(op: char, lhs: Expr, rhs: Expr) -> Expr {
+        Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
+    }
+
+    /// `Expr::Call` shorthand.
+    fn call(name: &str, args: Vec<Expr>) -> Expr { Expr::Call { name: name.to_owned(), args } }
+
+    #[test]
+    fn expr_number_float() {
+        use core::f64;
+
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Need a builder position — put it inside a scratch function.
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&num(f64::consts::PI)).unwrap();
+        assert!(val.is_const());
+        assert_eq!(val.get_constant(), Some((f64::consts::PI, false)));
+    }
+
+    #[test]
+    fn expr_number_integer_represented_as_float() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&Expr::Number(42.0)).unwrap();
+        assert!(val.is_const());
+        assert_eq!(val.get_constant(), Some((42.0, false)));
+    }
+
+    #[test]
+    fn expr_variable_found_in_symbol_table() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        // Manually inject a constant into the symbol table to simulate a param.
+        let sentinel = ctx.f64_type().const_float(7.0);
+        cg.symbols.insert("x".to_owned(), sentinel);
+
+        let val = cg.expr(&var("x")).unwrap();
+        assert_eq!(val, sentinel);
+    }
+
+    #[test]
+    fn expr_variable_unknown_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let err = cg.expr(&var("undefined")).unwrap_err();
+        assert_matches!(err, CodegenError::UnknownVariable(n) if n == "undefined");
+    }
+
+    /// Helper: compile a binary expression of two constants inside a scratch
+    /// function and return the IR instruction name emitted.
+    fn binary_instruction_name(op: char) -> String {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Use a real function with params so operands are runtime values,
+        // preventing constant folding.
+        let double = ctx.f64_type();
+        let ft = double.fn_type(&[double.into(), double.into()], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let a = f.get_nth_param(0).unwrap().into_float_value();
+        let b = f.get_nth_param(1).unwrap().into_float_value();
+        cg.symbols.insert("a".to_owned(), a);
+        cg.symbols.insert("b".to_owned(), b);
+
+        let expr = binop(op, var("a"), var("b"));
+        let val = cg.expr(&expr).unwrap();
+        val.get_name().to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn expr_binary_add_emits_fadd() {
+        assert_eq!(binary_instruction_name('+'), "addtmp");
+    }
+
+    #[test]
+    fn expr_binary_sub_emits_fsub() {
+        assert_eq!(binary_instruction_name('-'), "subtmp");
+    }
+
+    #[test]
+    fn expr_binary_mul_emits_fmul() {
+        assert_eq!(binary_instruction_name('*'), "multmp");
+    }
+
+    #[test]
+    fn expr_binary_div_emits_fdiv() {
+        assert_eq!(binary_instruction_name('/'), "divtmp");
+    }
+
+    #[test]
+    fn expr_binary_lt_emits_booltmp() {
+        assert_eq!(binary_instruction_name('<'), "booltmp");
+    }
+
+    #[test]
+    fn expr_binary_gt_emits_booltmp() {
+        assert_eq!(binary_instruction_name('>'), "booltmp");
+    }
+
+    #[test]
+    fn expr_binary_lt_constant_fold_true() {
+        // 1.0 < 2.0 → 1.0
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&binop('<', num(1.0), num(2.0))).unwrap();
+        // IRBuilder constant-folds this to 1.0
+        assert_eq!(val.get_constant(), Some((1.0, false)));
+    }
+
+    #[test]
+    fn expr_binary_lt_constant_fold_false() {
+        // 2.0 < 1.0 → 0.0
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&binop('<', num(2.0), num(1.0))).unwrap();
+        assert_eq!(val.get_constant(), Some((0.0, false)));
+    }
+
+    #[test]
+    fn expr_binary_gt_is_symmetric_to_lt() {
+        // `a > b` is `b < a`, so 2.0 > 1.0 → 1.0
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&binop('>', num(2.0), num(1.0))).unwrap();
+        assert_eq!(val.get_constant(), Some((1.0, false)));
+    }
+
+    #[test]
+    fn expr_binary_unknown_op_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let err = cg.expr(&binop('%', num(1.0), num(2.0))).unwrap_err();
+        assert_matches!(err, CodegenError::InvalidBinaryOp('%'));
+    }
+
+    #[test]
+    fn expr_call_unknown_function_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let ft = ctx.f64_type().fn_type(&[], false);
+        let f = cg.module.add_function("_scratch", ft, None);
+        let bb = ctx.append_basic_block(f, "entry");
+        cg.builder.position_at_end(bb);
+
+        let err = cg.expr(&call("ghost", vec![])).unwrap_err();
+        assert_matches!(err, CodegenError::UnknownFunction(n) if n == "ghost");
+    }
+
+    #[test]
+    fn expr_call_arity_mismatch_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Declare a 2-arg function in the module.
+        let double = ctx.f64_type();
+        let ft = double.fn_type(&[double.into(), double.into()], false);
+        cg.module.add_function("two_args", ft, None);
+
+        // Position the builder.
+        let scratch_ft = double.fn_type(&[], false);
+        let scratch = cg.module.add_function("_scratch", scratch_ft, None);
+        let bb = ctx.append_basic_block(scratch, "entry");
+        cg.builder.position_at_end(bb);
+
+        // Call with only one arg.
+        let err = cg.expr(&call("two_args", vec![num(1.0)])).unwrap_err();
+        assert_matches!(err, CodegenError::ArgCountMismatch { expected: 2, got: 1 });
+    }
+
+    #[test]
+    fn expr_call_emits_calltmp() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Declare `sin(x)` as a 1-arg extern.
+        let double = ctx.f64_type();
+        let ft = double.fn_type(&[double.into()], false);
+        cg.module.add_function("sin", ft, None);
+
+        let scratch_ft = double.fn_type(&[], false);
+        let scratch = cg.module.add_function("_scratch", scratch_ft, None);
+        let bb = ctx.append_basic_block(scratch, "entry");
+        cg.builder.position_at_end(bb);
+
+        let val = cg.expr(&call("sin", vec![num(1.0)])).unwrap();
+        assert_eq!(val.get_name().to_str().unwrap(), "calltmp");
+    }
+
+    #[test]
+    fn proto_creates_function_in_module() {
+        let ctx = Context::create();
+        let cg = make_codegen(&ctx);
+
+        cg.proto(&proto("my_fn", &["a", "b"])).unwrap();
+        assert!(cg.module.get_function("my_fn").is_some());
+    }
+
+    #[test]
+    fn proto_correct_param_count() {
+        let ctx = Context::create();
+        let cg = make_codegen(&ctx);
+
+        let fn_val = cg.proto(&proto("my_fn", &["x", "y", "z"])).unwrap();
+        assert_eq!(fn_val.count_params(), 3);
+    }
+
+    #[test]
+    fn proto_zero_args() {
+        let ctx = Context::create();
+        let cg = make_codegen(&ctx);
+
+        let fn_val = cg.proto(&proto("nullary", &[])).unwrap();
+        assert_eq!(fn_val.count_params(), 0);
+    }
+
+    #[test]
+    fn proto_no_body_emitted() {
+        // An extern prototype must have no basic blocks — it is a declaration only.
+        let ctx = Context::create();
+        let cg = make_codegen(&ctx);
+
+        let fn_val = cg.proto(&proto("extern_fn", &["a"])).unwrap();
+        assert_eq!(fn_val.count_basic_blocks(), 0);
+    }
+
+    #[test]
+    fn proto_params_have_no_names() {
+        // After our fix, proto() does not set param names — that is function()'s job.
+        let ctx = Context::create();
+        let cg = make_codegen(&ctx);
+
+        let fn_val = cg.proto(&proto("unnamed", &["a", "b"])).unwrap();
+        for param in fn_val.get_param_iter() {
+            // LLVM represents an unnamed param as an empty string.
+            assert_eq!(param.get_name().to_str().unwrap(), "");
+        }
+    }
+
+    #[test]
+    fn function_definition_compiles_and_verifies() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // def add(a b) a + b
+        let body = binop('+', var("a"), var("b"));
+        let fn_val = cg.func(&func("add", &["a", "b"], body)).unwrap();
+
+        assert!(fn_val.verify(false));
+        assert_eq!(fn_val.count_params(), 2);
+        assert_eq!(fn_val.count_basic_blocks(), 1);
+    }
+
+    #[test]
+    fn function_params_named_correctly() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let body = binop('+', var("x"), var("y"));
+        let fn_val = cg.func(&func("named", &["x", "y"], body)).unwrap();
+
+        let names: Vec<_> =
+            fn_val.get_param_iter().map(|p| p.get_name().to_str().unwrap().to_owned()).collect();
+        assert_eq!(names, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn function_symbol_table_cleared_between_functions() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // First function with param `a`.
+        cg.func(&func("first", &["a"], var("a"))).unwrap();
+        assert!(
+            !cg.symbols.contains_key("a"),
+            "symbols must be cleared after function body is compiled"
+        );
+    }
+
+    #[test]
+    fn function_extern_then_def_resolves_correctly() {
+        // This is the tutorial bug fix test.
+        // extern foo(a);  →  def foo(b) b;  should succeed, not fail with
+        // UnknownVariable.
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        cg.func(&extern_func("foo", &["a"])).unwrap();
+
+        let result = cg.func(&func("foo", &["b"], var("b")));
+        assert!(result.is_ok(), "def foo(b) b should resolve 'b', not 'a': {result:?}");
+    }
+
+    #[test]
+    fn function_redefinition_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        cg.func(&func("dup", &["x"], var("x"))).unwrap();
+
+        let err = cg.func(&func("dup", &["x"], var("x"))).unwrap_err();
+        assert_matches!(err, CodegenError::FunctionRedefinition(n) if n == "dup");
+    }
+
+    #[test]
+    fn function_arity_mismatch_with_existing_extern_returns_error() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Declare extern with 1 arg.
+        cg.func(&extern_func("foo", &["a"])).unwrap();
+
+        // Try to define with 2 args.
+        let err = cg.func(&func("foo", &["a", "b"], binop('+', var("a"), var("b")))).unwrap_err();
+        assert_matches!(err, CodegenError::ArgCountMismatch { expected: 1, got: 2 });
+    }
+
+    #[test]
+    fn function_extern_has_no_body() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let fn_val = cg.func(&extern_func("cos", &["x"])).unwrap();
+        assert_eq!(
+            fn_val.count_basic_blocks(),
+            0,
+            "extern declaration must not emit a basic block"
+        );
+    }
+
+    #[test]
+    fn function_body_error_erases_from_module() {
+        // If codegen of the body fails, the partial function must be removed
+        // so the user can redefine it.
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        // Body references an undefined variable — will fail.
+        let result = cg.func(&func("bad", &["x"], var("undefined")));
+        assert!(result.is_err());
+
+        // The function must have been erased.
+        assert!(
+            cg.module.get_function("bad").is_none(),
+            "failed function must be erased from the module"
+        );
+    }
+
+    #[test]
+    fn function_recursive_call_compiles() {
+        // def fib(x) fib(x)  — structurally valid even if it loops forever.
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let body = call("fib", vec![var("x")]);
+        let result = cg.func(&func("fib", &["x"], body));
+        assert!(result.is_ok());
+    }
+
+    // ── integration: full pipeline ────────────────────────────────────────────
+
+    #[test]
+    fn integration_constant_fold_addition() {
+        // def anon() 4.0 + 5.0  →  ret double 9.0 (IRBuilder constant-folds)
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let body = binop('+', num(4.0), num(5.0));
+        let fn_val = cg.func(&func("", &[], body)).unwrap();
+        assert!(fn_val.verify(false));
+
+        // The IR text must contain "ret double 9.0".
+        let ir = fn_val.to_string();
+        assert!(
+            ir.contains("9.0") || ir.contains("9.000000e+00"),
+            "expected constant-folded 9.0 in IR: {ir}"
+        );
+    }
+
+    #[test]
+    fn integration_call_extern() {
+        // extern cos(x)
+        // def anon() cos(1.234)
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        cg.func(&extern_func("cos", &["x"])).unwrap();
+
+        let body = call("cos", vec![num(1.234)]);
+        let fn_val = cg.func(&func("", &[], body)).unwrap();
+        assert!(fn_val.verify(false));
+
+        let ir = fn_val.to_string();
+        assert!(ir.contains("@cos"), "expected call to @cos in IR: {ir}");
+    }
+
+    #[test]
+    fn integration_quadratic_body() {
+        // def foo(a b) a*a + 2*a*b + b*b
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        let body = binop(
+            '+',
+            binop(
+                '+',
+                binop('*', var("a"), var("a")),
+                binop('*', binop('*', num(2.0), var("a")), var("b")),
+            ),
+            binop('*', var("b"), var("b")),
+        );
+
+        let fn_val = cg.func(&func("foo", &["a", "b"], body)).unwrap();
+        assert!(fn_val.verify(false));
+
+        let ir = fn_val.to_string();
+        assert!(ir.contains("fmul"), "expected fmul instructions in IR: {ir}");
+        assert!(ir.contains("fadd"), "expected fadd instructions in IR: {ir}");
+    }
+
+    #[test]
+    fn integration_module_contains_all_functions() {
+        let ctx = Context::create();
+        let mut cg = make_codegen(&ctx);
+
+        cg.func(&extern_func("sin", &["x"])).unwrap();
+        cg.func(&func(
+            "double_sin",
+            &["x"],
+            binop('+', call("sin", vec![var("x")]), call("sin", vec![var("x")])),
+        ))
+        .unwrap();
+
+        assert!(cg.module.get_function("sin").is_some());
+        assert!(cg.module.get_function("double_sin").is_some());
+    }
+}
+use inkwell::builder::BuilderError;
+use inkwell::support::LLVMString;
+use thiserror::Error as ThisError;
+
+/// The top-level error type
+#[derive(Debug, ThisError)]
+pub enum Error {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Codegen(#[from] CodegenError),
+
+    #[error(transparent)]
+    LLVMString(#[from] LLVMString),
+
+    #[error(transparent)]
+    Parser(#[from] ParseError),
+
+    #[error("{0}")]
+    Unknown(String),
+}
+
+#[derive(Debug, ThisError)]
+pub enum CodegenError {
+    #[error("unknown variable: '{0}'")]
+    UnknownVariable(String),
+
+    #[error("unknown function referenced: '{0}'")]
+    UnknownFunction(String),
+
+    #[error("invalid binary operator: '{0}'")]
+    InvalidBinaryOp(char),
+
+    #[error("argument count mismatch: expected {expected}, got {got}")]
+    ArgCountMismatch { expected: usize, got: usize },
+
+    #[error("function '{0}' cannot be redefined")]
+    FunctionRedefinition(String),
+
+    #[error("function verification failed: '{0}'")]
+    VerificationFailed(String),
+
+    #[error(transparent)]
+    Builder(#[from] BuilderError),
+
+    #[error("{0}")]
+    Unknown(String),
+}
+
+#[derive(Debug, ThisError, PartialEq)]
+pub enum ParseError {
+    #[error("unexpected end of input")]
+    UnexpectedEof,
+
+    #[error("expected number literal, got '{0}'")]
+    ExpectedNumber(String),
+
+    #[error("expected identifier, got '{0}'")]
+    ExpectedIdent(String),
+
+    #[error("expected '(' got '{0}'")]
+    ExpectedLParen(String),
+
+    #[error("expected ')' got '{0}'")]
+    ExpectedRParen(String),
+
+    #[error("expected ',' or ')' in argument list, got '{0}'")]
+    ExpectedCommaOrRParen(String),
+
+    #[error("expected operator in custom operator declaration, got '{0}'")]
+    ExpectedOperator(String),
+
+    #[error("expected function name in prototype, got '{0}'")]
+    ExpectedPrototypeName(String),
+
+    #[error("unknown token {0} when expecting an expression")]
+    ExpectedExpr(String),
+
+    #[error("invalid binary operator: '{0}'")]
+    InvalidOperator(String),
+
+    #[error("invalid operator precedence: {0}")]
+    InvalidPrecedence(f64),
+
+    #[error("unexpected tokens after parsed expression, starting at '{0}'")]
+    TrailingTokens(String),
+}
+use core::iter::FusedIterator;
+
+use crate::token::{Kind, Span, Token};
+
+/// Transforms a source string into a stream of [`Token`]s.
+#[derive(Clone, Debug)]
+pub struct Lexer<'a> {
+    source: &'a str,
+    /// Current byte position in the source.
+    cursor: usize,
+}
+
+impl<'a> Lexer<'a> {
+    #[must_use]
+    pub const fn new(source: &'a str) -> Self { Self { source, cursor: 0 } }
+
+    /// Lex and return the next [`Token`], including its [`Span`].
+    fn lex_next(&mut self) -> Token<'a> {
+        // Skip whitespace (including newlines).
+        self.advance_while(|b| b.is_ascii_whitespace());
+
+        let start = self.cursor;
+
+        let Some(ch) = self.peek() else {
+            return self.simple(Kind::Eof, start);
+        };
+
+        self.advance(); // consume the leading byte
+
+        match ch {
+            b'#' => {
+                self.advance_while(|b| b != b'\n' && b != b'\r');
+                self.simple(Kind::Comment, start)
+            }
+
+            b',' => self.simple(Kind::Comma, start),
+            b'(' => self.simple(Kind::LParen, start),
+            b')' => self.simple(Kind::RParen, start),
+
+            // Identifiers and keywords: [a-zA-Z_][a-zA-Z0-9_]*
+            b if b.is_ascii_alphabetic() || b == b'_' => {
+                self.advance_while(|b| b.is_ascii_alphanumeric() || b == b'_');
+
+                let lexeme = self.slice(start);
+                let kind = match lexeme {
+                    "def" => Kind::Def,
+                    "extern" => Kind::Extern,
+                    "if" => Kind::If,
+                    "then" => Kind::Then,
+                    "else" => Kind::Else,
+                    "for" => Kind::For,
+                    "in" => Kind::In,
+                    "unary" => Kind::Unary,
+                    "binary" => Kind::Binary,
+                    "var" => Kind::Var,
+                    _ => Kind::Ident(lexeme),
+                };
+                self.simple(kind, start)
+            }
+
+            b if b.is_ascii_digit() => {
+                self.advance_while(|b| b.is_ascii_digit());
+
+                if self.peek() == Some(b'.') && self.peek_nth(1).is_some_and(|b| b.is_ascii_digit())
+                {
+                    self.advance(); // consume '.'
+                    self.advance_while(|b| b.is_ascii_digit());
+                }
+
+                let lexeme = self.slice(start);
+                let kind = match lexeme.parse() {
+                    Ok(n) => Kind::Number(n),
+                    Err(_) => Kind::Invalid(lexeme),
+                };
+                self.simple(kind, start)
+            }
+
+            b'.' => {
+                if self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                    self.advance_while(|b| b.is_ascii_digit());
+                    let lexeme = self.slice(start);
+                    let kind = match lexeme.parse() {
+                        Ok(n) => Kind::Number(n),
+                        Err(_) => Kind::Invalid(lexeme),
+                    };
+                    self.simple(kind, start)
+                } else {
+                    self.simple(Kind::Op('.'), start)
+                }
+            }
+
+            b => self.simple(Kind::Op(char::from(b)), start),
+        }
+    }
+
+    fn simple(&self, kind: Kind<'a>, start: usize) -> Token<'a> {
+        Token { kind, span: self.span(start) }
+    }
+}
+
+impl<'a> Lexer<'a> {
+    #[inline]
+    fn peek(&self) -> Option<u8> { self.peek_nth(0) }
+
+    #[inline]
+    fn peek_nth(&self, n: usize) -> Option<u8> {
+        self.source.as_bytes().get(self.cursor + n).copied()
+    }
+
+    #[inline]
+    fn advance(&mut self) { self.cursor += 1; }
+
+    #[inline]
+    fn advance_while<P>(&mut self, predicate: P)
+    where
+        Self: Sized,
+        P: Fn(u8) -> bool,
+    {
+        while self.peek().is_some_and(&predicate) {
+            self.advance();
+        }
+    }
+
+    fn span(&self, start: usize) -> Span { Span { start, end: self.cursor } }
+
+    fn slice(&self, start: usize) -> &'a str { &self.source[start..self.cursor] }
+}
+
+/// Yields [`Token`] (kind + span). Stops at EOF (exclusive).
+///
+/// Use this when you need source positions for diagnostics.
+impl<'a> Iterator for Lexer<'a> {
+    type Item = Token<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let token = self.lex_next();
+            match token.kind {
+                Kind::Eof => return None,
+                Kind::Comment => {}
+                _ => return Some(token),
+            }
+        }
+    }
+}
+
+impl FusedIterator for Lexer<'_> {}
+
+/// Convenience iterator that yields only [`TokenKind`], discarding spans.
+/// If you need spans for diagnostics, use the [`Token`] iterator.
+pub struct TokenKinds<'a>(Lexer<'a>);
+
+impl<'a> Lexer<'a> {
+    /// Returns an iterator that yields [`TokenKind`] without spans.
+    #[must_use]
+    pub fn tokens(self) -> TokenKinds<'a> { TokenKinds(self) }
+}
+
+impl<'a> Iterator for TokenKinds<'a> {
+    type Item = Kind<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> { self.0.next().map(|t| t.kind) }
+}
+
+impl FusedIterator for TokenKinds<'_> {}
+
+#[cfg(test)]
+mod tests {
+    use core::{assert_matches, f64};
+
+    use super::*;
+
+    /// Collect all `TokenKind`s from a source string, comments and EOF
+    /// excluded.
+    fn tokenize(src: &str) -> Vec<Kind<'_>> { Lexer::new(src).tokens().collect() }
+
+    /// Collect full `Token`s (kind + span) from a source string.
+    fn tokenize_full(src: &str) -> Vec<Token<'_>> { Lexer::new(src).collect() }
+
+    /// Assert that a source string produces exactly one token of the given
+    /// kind.
+    macro_rules! single {
+    ($src:expr, $pat:pat) => {{
+        let tokens = tokenize($src);
+        assert_eq!(tokens.len(), 1, "expected exactly 1 token, got {:?}", tokens);
+        assert_matches!(tokens[0], $pat);
+    }};
+    ($src:expr, $pat:pat if $guard:expr) => {{
+        let tokens = tokenize($src);
+        assert_eq!(tokens.len(), 1, "expected exactly 1 token, got {:?}", tokens);
+        assert_matches!(tokens[0], $pat if $guard);
+    }};
+}
+
+    #[test]
+    fn empty_source_yields_no_tokens() {
+        assert!(tokenize("").is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_yields_no_tokens() {
+        assert!(tokenize("   \t\n\r\n   ").is_empty());
+    }
+
+    #[test]
+    fn comment_alone_yields_no_tokens() {
+        assert!(tokenize("# this is a comment").is_empty());
+    }
+
+    #[test]
+    fn comment_skipped_before_token() {
+        single!("# comment\ndef", Kind::Def);
+    }
+
+    #[test]
+    fn comment_skipped_after_token() {
+        let tokens = tokenize("def # comment");
+        assert_eq!(tokens, vec![Kind::Def]);
+    }
+
+    #[test]
+    fn comment_does_not_consume_newline() {
+        // Tokens after the newline following a comment must still be lexed.
+        let tokens = tokenize("# line one\ndef foo");
+        assert_eq!(tokens.len(), 2);
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("foo"));
+    }
+
+    #[test]
+    fn multiple_comments_all_skipped() {
+        let tokens = tokenize("# one\n# two\n# three\nextern");
+        assert_eq!(tokens, vec![Kind::Extern]);
+    }
+
+    #[test]
+    fn keyword_def() {
+        single!("def", Kind::Def);
+    }
+
+    #[test]
+    fn keyword_extern() {
+        single!("extern", Kind::Extern);
+    }
+
+    #[test]
+    fn keyword_if() {
+        single!("if", Kind::If);
+    }
+
+    #[test]
+    fn keyword_then() {
+        single!("then", Kind::Then);
+    }
+
+    #[test]
+    fn keyword_else() {
+        single!("else", Kind::Else);
+    }
+
+    #[test]
+    fn keyword_for() {
+        single!("for", Kind::For);
+    }
+
+    #[test]
+    fn keyword_in() {
+        single!("in", Kind::In);
+    }
+
+    #[test]
+    fn keyword_unary() {
+        single!("unary", Kind::Unary);
+    }
+
+    #[test]
+    fn keyword_binary() {
+        single!("binary", Kind::Binary);
+    }
+
+    #[test]
+    fn keyword_var() {
+        single!("var", Kind::Var);
+    }
+
+    #[test]
+    fn keyword_prefix_is_ident_not_keyword() {
+        // "define" starts with "def" but is not the keyword.
+        single!("define", Kind::Ident("define"));
+    }
+
+    #[test]
+    fn keyword_suffix_is_ident_not_keyword() {
+        // "ndef" ends with "def" but is an identifier.
+        single!("ndef", Kind::Ident("ndef"));
+    }
+
+    #[test]
+    fn ident_simple() {
+        single!("foo", Kind::Ident("foo"));
+    }
+
+    #[test]
+    fn ident_with_digits() {
+        single!("x1", Kind::Ident("x1"));
+    }
+
+    #[test]
+    fn ident_with_underscores() {
+        single!("my_var", Kind::Ident("my_var"));
+    }
+
+    #[test]
+    fn ident_leading_underscore() {
+        single!("_private", Kind::Ident("_private"));
+    }
+
+    #[test]
+    fn ident_all_caps() {
+        single!("FOO", Kind::Ident("FOO"));
+    }
+
+    #[test]
+    fn ident_mixed_case() {
+        single!("camelCase", Kind::Ident("camelCase"));
+    }
+
+    #[test]
+    fn ident_does_not_consume_following_op() {
+        let tokens = tokenize("x+y");
+        assert_eq!(tokens.len(), 3);
+        assert_matches!(tokens[0], Kind::Ident("x"));
+        assert_matches!(tokens[1], Kind::Op('+'));
+        assert_matches!(tokens[2], Kind::Ident("y"));
+    }
+
+    #[test]
+    fn number_integer() {
+        single!("42", Kind::Number(42.0));
+    }
+
+    #[test]
+    fn number_zero() {
+        single!("0", Kind::Number(0.0));
+    }
+
+    #[test]
+    #[expect(clippy::approx_constant)]
+    fn number_float() {
+        single!("3.14", Kind::Number(v) if (v - 3.14).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn number_float_leading_zero() {
+        single!("0.5", Kind::Number(v) if (v - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn number_dot_led_float() {
+        // C++ parses ".4" as 0.4; we must match that behaviour.
+        single!(".4", Kind::Number(v) if (v - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn number_dot_led_float_zero() {
+        single!(".0", Kind::Number(v) if v == 0.0);
+    }
+
+    #[test]
+    fn number_integer_followed_by_dot_op() {
+        // "1." → Number(1.0) then Op('.') — dot is NOT part of the number
+        // because no digit follows it.
+        let tokens = tokenize("1.");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0], Kind::Number(1.0));
+        assert_eq!(tokens[1], Kind::Op('.'));
+    }
+
+    #[test]
+    fn lone_dot_is_op() {
+        // A bare '.' with no trailing digit is an operator, not a number.
+        single!(".", Kind::Op('.'));
+    }
+
+    #[test]
+    fn number_does_not_consume_following_op() {
+        let tokens = tokenize("4+5");
+        assert_eq!(tokens.len(), 3);
+        assert_matches!(tokens[0], Kind::Number(4.0));
+        assert_matches!(tokens[1], Kind::Op('+'));
+        assert_matches!(tokens[2], Kind::Number(5.0));
+    }
+
+    #[test]
+    fn number_large_integer() {
+        single!("9999999", Kind::Number(9_999_999.0));
+    }
+
+    #[test]
+    fn punct_lparen() {
+        single!("(", Kind::LParen);
+    }
+
+    #[test]
+    fn punct_rparen() {
+        single!(")", Kind::RParen);
+    }
+
+    #[test]
+    fn punct_comma() {
+        single!(",", Kind::Comma);
+    }
+
+    #[test]
+    fn op_plus() {
+        single!("+", Kind::Op('+'));
+    }
+
+    #[test]
+    fn op_minus() {
+        single!("-", Kind::Op('-'));
+    }
+
+    #[test]
+    fn op_star() {
+        single!("*", Kind::Op('*'));
+    }
+
+    #[test]
+    fn op_slash() {
+        single!("/", Kind::Op('/'));
+    }
+
+    #[test]
+    fn op_lt() {
+        single!("<", Kind::Op('<'));
+    }
+
+    #[test]
+    fn op_gt() {
+        single!(">", Kind::Op('>'));
+    }
+
+    #[test]
+    fn op_equals() {
+        single!("=", Kind::Op('='));
+    }
+
+    #[test]
+    fn op_semicolon() {
+        single!(";", Kind::Op(';'));
+    }
+
+    #[test]
+    fn def_with_two_params_and_body() {
+        let tokens = tokenize("def foo(x y) x+y");
+        assert_eq!(tokens.len(), 9);
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("foo"));
+        assert_matches!(tokens[2], Kind::LParen);
+        assert_matches!(tokens[3], Kind::Ident("x"));
+        assert_matches!(tokens[4], Kind::Ident("y"));
+        assert_matches!(tokens[5], Kind::RParen);
+        assert_matches!(tokens[6], Kind::Ident("x"));
+        assert_matches!(tokens[7], Kind::Op('+'));
+        // 'y' at position 8 follows
+    }
+
+    #[test]
+    fn def_with_semicolon_and_trailing_expr() {
+        // "def foo(x y) x+y y;" — two dispatches from one line.
+        let tokens = tokenize("def foo(x y) x+y y;");
+        assert_eq!(tokens.len(), 11);
+        assert_matches!(tokens[10], Kind::Op(';'));
+    }
+
+    #[test]
+    fn call_with_float_arg() {
+        let tokens = tokenize("foo(y, 4.0)");
+        assert_eq!(tokens.len(), 6);
+        assert_matches!(tokens[0], Kind::Ident("foo"));
+        assert_matches!(tokens[1], Kind::LParen);
+        assert_matches!(tokens[2], Kind::Ident("y"));
+        assert_matches!(tokens[3], Kind::Comma);
+        assert_matches!(tokens[4], Kind::Number(4.0));
+        assert_matches!(tokens[5], Kind::RParen);
+    }
+
+    #[test]
+    fn extern_declaration() {
+        let tokens = tokenize("extern sin(a);");
+        assert_eq!(tokens.len(), 6);
+        assert_matches!(tokens[0], Kind::Extern);
+        assert_matches!(tokens[1], Kind::Ident("sin"));
+        assert_matches!(tokens[2], Kind::LParen);
+        assert_matches!(tokens[3], Kind::Ident("a"));
+        assert_matches!(tokens[4], Kind::RParen);
+    }
+
+    #[test]
+    fn multiline_input() {
+        let src = "def fib(x)\n  x + 1";
+        let tokens = tokenize(src);
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("fib"));
+        // The newline is just whitespace. no extra tokens emitted.
+        assert_matches!(tokens[5], Kind::Ident("x"));
+        assert_matches!(tokens[6], Kind::Op('+'));
+        assert_matches!(tokens[7], Kind::Number(1.0));
+    }
+
+    #[test]
+    fn fibonacci_function() {
+        let src = "def fib(x) if x < 3 then 1 else fib(x-1)+fib(x-2)";
+        let tokens = tokenize(src);
+        assert_matches!(tokens[0], Kind::Def);
+        assert_matches!(tokens[1], Kind::Ident("fib"));
+        assert_matches!(tokens[5], Kind::If);
+        assert_matches!(tokens[7], Kind::Op('<'));
+        assert_matches!(tokens[9], Kind::Then);
+        assert_matches!(tokens[11], Kind::Else);
+        assert_matches!(tokens[12], Kind::Ident("fib"));
+    }
+
+    #[test]
+    fn span_single_char_op() {
+        let tokens = tokenize_full("+");
+        assert_eq!(tokens[0].span, Span { start: 0, end: 1 });
+    }
+
+    #[test]
+    fn span_keyword() {
+        let tokens = tokenize_full("def");
+        assert_eq!(tokens[0].span, Span { start: 0, end: 3 });
+    }
+
+    #[test]
+    fn span_ident() {
+        let tokens = tokenize_full("foo");
+        assert_eq!(tokens[0].span, Span { start: 0, end: 3 });
+    }
+
+    #[test]
+    fn span_number() {
+        let tokens = tokenize_full("3.14");
+        assert_eq!(tokens[0].span, Span { start: 0, end: 4 });
+    }
+
+    #[test]
+    fn span_accounts_for_leading_whitespace() {
+        // "  foo" — foo starts at byte 2.
+        let tokens = tokenize_full("  foo");
+        assert_eq!(tokens[0].span, Span { start: 2, end: 5 });
+    }
+
+    #[test]
+    fn span_second_token_correct() {
+        // "x+y": '+' is at byte 1.
+        let tokens = tokenize_full("x+y");
+        assert_eq!(tokens[1].span, Span { start: 1, end: 2 });
+    }
+
+    #[test]
+    fn span_covers_full_ident() {
+        let tokens = tokenize_full("hello");
+        assert_eq!(tokens[0].span, Span { start: 0, end: 5 });
+        assert_eq!(&"hello"[tokens[0].span.start..tokens[0].span.end], "hello");
+    }
+
+    #[test]
+    fn iterator_is_fused_after_eof() {
+        // A fused iterator must keep returning None after exhaustion.
+        let mut lexer = Lexer::new("x");
+        assert!(lexer.next().is_some()); // 'x'
+        assert!(lexer.next().is_none()); // EOF
+        assert!(lexer.next().is_none()); // still None — fused
+        assert!(lexer.next().is_none());
+    }
+
+    #[test]
+    fn tokens_iterator_excludes_comments() {
+        // The TokenKinds wrapper must never yield Comment.
+        let kinds = Lexer::new("# comment\nfoo # another\nbar").tokens();
+        for kind in kinds {
+            assert_ne!(kind, Kind::Comment);
+        }
+    }
+
+    #[test]
+    fn token_iterator_includes_all_full_tokens() {
+        // The Token iterator (with spans) must also skip comments.
+        let tokens: Vec<_> = Lexer::new("# comment\nfoo").collect();
+        assert_eq!(tokens.len(), 1);
+        assert_matches!(tokens[0].kind, Kind::Ident("foo"));
+    }
+
+    #[test]
+    fn cloned_lexer_is_independent() {
+        // Lexer is Clone. a clone must not share cursor state.
+        let original = Lexer::new("x y");
+        let mut clone = original.clone();
+        let mut original = original;
+
+        let t1 = original.next().unwrap();
+        // Advance original past 'x'. Clone should still start at 'x'.
+        let t2 = clone.next().unwrap();
+        assert_eq!(t1.kind, t2.kind);
+    }
+
+    #[test]
+    fn ident_slice_matches_source() {
+        let src = "hello";
+        let tokens = tokenize_full(src);
+        let span = tokens[0].span;
+        assert_eq!(&src[span.start..span.end], "hello");
+    }
+
+    #[test]
+    fn number_slice_matches_source() {
+        let src = "3.14";
+        let tokens = tokenize_full(src);
+        let span = tokens[0].span;
+        assert_eq!(&src[span.start..span.end], "3.14");
+    }
+}
+pub mod ast;
+pub mod codegen;
+pub mod error;
+pub mod lexer;
+pub mod parser;
+pub mod token;
+
+pub use codegen::CodeGen;
+pub use error::Error;
+pub use lexer::{Lexer, TokenKinds};
+pub use parser::Parser;
+#![expect(unsafe_code)]
+use std::collections::HashMap;
+use std::io;
+use std::io::prelude::*;
+
+use inkwell::OptimizationLevel;
+use inkwell::context::Context;
+use inkwell::targets::{InitializationConfig, Target};
+use kcc::codegen::SymbolTable;
+use kcc::token::Kind;
+use kcc::{CodeGen, Error, Lexer, Parser};
+
+/// Binary-operator precedence table.
+const PRECEDENCE_OPS: [(char, u8); 6] =
+    [('=', 2), ('<', 10), ('+', 20), ('-', 20), ('*', 40), ('/', 40)];
+
+/// Print a prompt and flush stderr immediately, matching C++'s `fprintf(stderr,
+/// "ready> ")`.
+macro_rules! prompt {
+     ( $( $x:expr ),* ) => {
+        eprint!( $($x, )* );
+        std::io::stderr().flush().expect("failed to flush stdout");
+    };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn putchard(x: f64) -> f64 {
+    // let x = unsafe { x.abs().to_int_unchecked::<u8>() };
+    #[expect(clippy::as_conversions, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let c = char::from(x.round().abs() as u8);
+    prompt!("{c}");
+    x
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn printd(x: f64) -> f64 {
+    println!("{x}");
+    x
+}
+
+// Add the fns above to a global array, so Rust compiler won't remove them.
+pub static EXTERN_FNS: [extern "C" fn(f64) -> f64; 2] = [putchard, printd];
+
+fn main() -> Result<(), Error> {
+    let stdin = io::stdin();
+    prompt!(">>> ");
+
+    Target::initialize_native(&InitializationConfig::default()).map_err(Error::Unknown)?;
+
+    let context = Context::create();
+
+    let module = context.create_module("kcc");
+    // module.run_passes(passes, machine, options)
+
+    let engine = module.create_jit_execution_engine(OptimizationLevel::Aggressive)?;
+    let target_data = engine.get_target_data();
+    let data_layout = target_data.get_data_layout();
+
+    module.set_data_layout(&data_layout);
+
+    let mut codegen = CodeGen {
+        context: &context,
+        module,
+        builder: context.create_builder(),
+        engine,
+        symbols: SymbolTable::default(),
+    };
+
+    let prec = HashMap::from(PRECEDENCE_OPS);
+
+    for line in stdin.lock().lines() {
+        let buffer = line?;
+
+        // Empty line = Ctrl+D (EOF) on most terminals.
+        if buffer.is_empty() {
+            break;
+        }
+
+        // Lex the entire line into a Vec<TokenKind> upfront.
+        // C++ lexes on-demand from stdin; we batch-lex one line at a time.
+        // The semantics are identical for single-line input; multi-line
+        // function bodies would require accumulation (future work).
+        let tokens: Vec<_> = Lexer::new(&buffer).tokens().collect();
+
+        // An empty token list (blank line or comment-only) — just re-prompt.
+        if tokens.is_empty() {
+            prompt!(">>> ");
+            continue;
+        }
+
+        let mut parser = Parser::new(&tokens, &prec);
+
+        // Run the "interpreter loop".
+        loop {
+            match parser.current() {
+                // Past the end of the token slice...be done with this line.
+                Err(_) => break,
+
+                // Semicolons are statement separators; skip silently.
+                Ok(Kind::Op(';')) => {
+                    parser.advance_unchecked();
+                }
+
+                Ok(Kind::Def) => handle_definition(&mut parser, &mut codegen),
+                Ok(Kind::Extern) => handle_extern(&mut parser, &mut codegen),
+
+                // Any other token: treat as a top-level expression.
+                _ => handle_toplevel_expr(&mut parser, &mut codegen),
+            }
+        }
+
+        // Print the prompt for the next line after finishing all dispatches.
+        // This matches C++: the prompt is printed at the *top* of MainLoop's
+        // while(true) body, i.e. before each new dispatch, which from the
+        // user's perspective means "after the previous output".
+        prompt!(">>> ");
+    }
+
+    // Print out all of the generated code.
+    codegen.module.print_to_stderr();
+
+    Ok(())
+}
+
+// The following functions skip one token for error recovery On failure
+// matching the C++ version.
+
+/// Handle a `def` — parse a function definition and report success or failure.
+fn handle_definition(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
+    match parser.parse_definition() {
+        Ok(func) => match codegen.func(&func) {
+            Ok(fn_val) => {
+                eprintln!("Read function definition:");
+                fn_val.print_to_stderr();
+            }
+            Err(e) => eprintln!("Error: {e}"),
+        },
+        Err(e) => {
+            eprintln!("Error in definition: {e}");
+            parser.skip_for_recovery();
+        }
+    }
+}
+
+/// Handle an `extern` declaration.
+fn handle_extern(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
+    match parser.parse_extern() {
+        Ok(func) => match codegen.proto(&func.proto) {
+            Ok(proto) => {
+                eprintln!("Read extern: ");
+                proto.print_to_stderr();
+            }
+            Err(e) => eprintln!("Error: {e}"),
+        },
+        Err(e) => {
+            eprintln!("Error parsing extern: {e}");
+            parser.skip_for_recovery();
+        }
+    }
+}
+/// Handle a top-level expression.
+fn handle_toplevel_expr(parser: &mut Parser<'_>, codegen: &mut CodeGen<'_>) {
+    match parser.parse_toplevel_expr() {
+        Ok(func) => match codegen.func(&func) {
+            Ok(fn_val) => {
+                eprintln!("Read top-level expression:");
+                fn_val.print_to_stderr();
+                // erase so it doesn't conflict on the next top-level expr
+                #[expect(unsafe_code)]
+                unsafe {
+                    fn_val.delete();
+                };
+            }
+            Err(e) => eprintln!("Error: {e}"),
+        },
+        Err(e) => {
+            eprintln!("Error: {e}");
+            parser.skip_for_recovery();
+        }
+    }
+}
+use std::collections::HashMap;
+
+use crate::ast::{Expr, Function, Prototype};
+use crate::error::ParseError;
+use crate::token::Kind;
+
+/// the synthetic prototype wrapping a top-level expression.
+const ANON_FN: &str = "__anon_expr";
+
+/// A recursive-descent / Pratt parser for the Kaleidoscope language
+#[derive(Clone, Debug)]
+pub struct Parser<'a> {
+    tokens: &'a [Kind<'a>],
+    /// Index of the token currently being examined.
+    cursor: usize,
+    /// Binary-operator precedence table. Keyed by operator character.
+    prec: &'a HashMap<char, u8>,
+}
+
+impl<'a> Parser<'a> {
+    /// Construct a parser from a pre-tokenised slice and a precedence table.
+    #[must_use]
+    pub const fn new(tokens: &'a [Kind<'a>], prec: &'a HashMap<char, u8>) -> Self {
+        Self { tokens, prec, cursor: 0 }
+    }
+
+    /// expression ::= primary binoprhs
+    pub fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        let lhs = self.parse_primary()?;
+        self.parse_bin_expr(0, lhs)
+    }
+
+    /// numberexpr ::= number
+    pub fn parse_num_expr(&mut self) -> Result<Expr, ParseError> {
+        let token = self.current()?;
+        let Kind::Number(n) = token else {
+            return Err(ParseError::ExpectedNumber(token.to_string()));
+        };
+
+        self.advance_unchecked(); // consume the number; soft-fail at EOF is fine here
+        Ok(Expr::Number(n))
+    }
+
+    /// parenexpr ::= '(' expression ')'
+    pub fn parse_paren_expr(&mut self) -> Result<Expr, ParseError> {
+        // Validate and consume '('
+        let token = self.current()?;
+        let Kind::LParen = token else {
+            return Err(ParseError::ExpectedLParen(token.to_string()));
+        };
+
+        self.advance()?; // must have tokens after '('
+
+        let result = self.parse_expr()?;
+
+        // Validate and consume ')'
+        let token = self.current()?;
+        let Kind::RParen = token else {
+            return Err(ParseError::ExpectedRParen(token.to_string()));
+        };
+
+        self.advance_unchecked(); // ')' may be the last token
+        Ok(result)
+    }
+
+    /// identifierexpr ::= identifier
+    ///                   | identifier '(' expression* ')'
+    pub fn parse_ident_expr(&mut self) -> Result<Expr, ParseError> {
+        let token = self.current()?;
+        let Kind::Ident(ident) = token else {
+            return Err(ParseError::ExpectedIdent(token.to_string()));
+        };
+        let name = ident.to_owned();
+
+        self.advance_unchecked(); // move past identifier; may hit EOF
+
+        if !matches!(self.current(), Ok(Kind::LParen)) {
+            return Ok(Expr::Variable(name));
+        }
+
+        // It's a call. consume '('
+        self.advance()?; // must have tokens inside arg list or ')'
+
+        let mut args = Vec::new();
+        while !matches!(self.current()?, Kind::RParen) {
+            args.push(self.parse_expr()?);
+
+            match self.current()? {
+                Kind::Comma => self.advance()?, // consume ',' then expect more
+                Kind::RParen => break,
+                t => return Err(ParseError::ExpectedCommaOrRParen(t.to_string())),
+            }
+        }
+
+        self.advance_unchecked(); // consume ')'; soft-fail at EOF
+        Ok(Expr::Call { name, args })
+    }
+
+    /// primary ::= identifierexpr | numberexpr | parenexpr
+    pub fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        match self.current()? {
+            Kind::Ident(_) => self.parse_ident_expr(),
+            Kind::Number(_) => self.parse_num_expr(),
+            Kind::LParen => self.parse_paren_expr(),
+            token => Err(ParseError::ExpectedExpr(token.to_string())),
+        }
+    }
+
+    /// binoprhs ::= (op primary)*
+    ///
+    /// Pratt / precedence-climbing parser. `min_prec` is the minimum
+    /// precedence level the next operator must meet to be consumed.
+    pub fn parse_bin_expr(&mut self, min_prec: u8, mut lhs: Expr) -> Result<Expr, ParseError> {
+        loop {
+            // If the current token is not a known operator, or its precedence
+            // is below `min_prec`, we are done climbing.
+            let tok_prec = match self.tok_precedence() {
+                Some(p) if p >= min_prec => p,
+                _ => return Ok(lhs),
+            };
+
+            let token = self.current()?;
+            let Kind::Op(op) = token else {
+                // tok_precedence confirmed it's an Op, so this branch is
+                // unreachable but we handle it for exhaustiveness.
+                return Err(ParseError::InvalidOperator(token.to_string()));
+            };
+
+            // Consume the operator. Hard-fail: there must be a RHS.
+            self.advance()?;
+
+            let mut rhs = self.parse_primary()?;
+
+            // If the next operator binds more tightly, give it the RHS first.
+            if let Some(next_prec) = self.tok_precedence()
+                && tok_prec < next_prec
+            {
+                // used saturating add in the case where there's a user-defined operator with
+                // precedence 255, to avoid overflow.
+                rhs = self.parse_bin_expr(tok_prec.saturating_add(1), rhs)?;
+            }
+
+            lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+        }
+    }
+
+    /// prototype ::= id '(' id* ')'
+    pub fn parse_prototype(&mut self) -> Result<Prototype, ParseError> {
+        let token = self.current()?;
+        let Kind::Ident(ident) = token else {
+            return Err(ParseError::ExpectedPrototypeName(token.to_string()));
+        };
+        let name = ident.to_owned();
+        self.advance()?;
+
+        let token = self.current()?;
+        let Kind::LParen = token else {
+            return Err(ParseError::ExpectedLParen(token.to_string()));
+        };
+        self.advance()?;
+
+        let mut args = Vec::new();
+        while let Ok(Kind::Ident(arg)) = self.current() {
+            args.push(arg.to_owned());
+            self.advance_unchecked(); // EOF after last arg is acceptable
+        }
+
+        let token = self.current()?;
+        let Kind::RParen = token else {
+            return Err(ParseError::ExpectedRParen(token.to_string()));
+        };
+
+        self.advance_unchecked(); // ')' may be the last token
+        Ok(Prototype { name, args })
+    }
+
+    /// definition ::= 'def' prototype expression
+    pub fn parse_definition(&mut self) -> Result<Function, ParseError> {
+        self.advance()?; // eat 'def'
+        let proto = self.parse_prototype()?;
+        let body = self.parse_expr()?;
+        Ok(Function { proto, body: Some(body) })
+    }
+
+    /// external ::= 'extern' prototype
+    pub fn parse_extern(&mut self) -> Result<Function, ParseError> {
+        self.advance()?; // eat 'extern'
+        let proto = self.parse_prototype()?;
+        Ok(Function { proto, body: None })
+    }
+
+    /// toplevelexpr ::= expression
+    ///
+    /// Wraps a bare expression in a synthetic anonymous function
+    pub fn parse_toplevel_expr(&mut self) -> Result<Function, ParseError> {
+        let expr = self.parse_expr()?;
+        Ok(Function {
+            proto: Prototype { name: ANON_FN.to_owned(), args: vec![] },
+            body: Some(expr),
+        })
+    }
+}
+
+impl<'a> Parser<'a> {
+    /// Returns the current token, or `EOF` if the cursor is past
+    /// the end of the token slice.
+    pub fn current(&self) -> Result<Kind<'a>, ParseError> {
+        self.tokens.get(self.cursor).copied().ok_or(ParseError::UnexpectedEof)
+    }
+
+    /// Advance the cursor, returning `Err(UnexpectedEof)` if we move past
+    /// the end. Use when the grammar *requires* a token to follow.
+    pub fn advance(&mut self) -> Result<(), ParseError> {
+        self.cursor += 1;
+        if self.is_eof() { Err(ParseError::UnexpectedEof) } else { Ok(()) }
+    }
+
+    /// Advance the cursor without failing at EOF.
+    ///
+    /// Use when reaching the end of the stream after consuming a token is
+    /// legitimate
+    ///
+    /// (e.g. closing ')', last argument, numeric literal at the end of input).
+    pub fn advance_unchecked(&mut self) {
+        self.cursor += 1;
+        // cursor may now == tokens.len(); that is fine — is_eof() will reflect
+        // it
+    }
+
+    /// Skip one token for error recovery
+    ///
+    /// Returns `true` if there are more tokens to process.
+    pub fn skip_for_recovery(&mut self) -> bool {
+        self.cursor += 1;
+        !self.is_eof()
+    }
+
+    /// Returns the precedence of the current token if it is a known binary
+    /// operator, or `None` otherwise.
+    #[must_use]
+    pub fn tok_precedence(&self) -> Option<u8> {
+        let Kind::Op(op) = self.current().ok()? else { return None };
+        let p = self.prec.get(&op).copied()?;
+        (p > 0).then_some(p)
+    }
+
+    /// Returns `true` if the cursor is at or past the end of the token slice.
+    #[must_use]
+    pub const fn is_eof(&self) -> bool { self.cursor >= self.tokens.len() }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::{assert_matches, f64};
+
+    use super::*;
+    use crate::lexer::Lexer;
+
+    fn default_prec() -> HashMap<char, u8> {
+        [('=', 2u8), ('<', 10), ('>', 10), ('+', 20), ('-', 20), ('*', 40), ('/', 40)]
+            .into_iter()
+            .collect()
+    }
+
+    /// Lex `src` and return a parser over the resulting token slice.
+    /// The token `Vec` is returned alongside so it outlives the parser.
+    fn parser(src: &str) -> (Vec<Kind<'_>>, HashMap<char, u8>) {
+        let tokens = Lexer::new(src).tokens().collect();
+        let prec = default_prec();
+        (tokens, prec)
+    }
+
+    /// Convenience: parse a full expression from `src`.
+    macro_rules! parse_expr {
+        ($src:expr) => {{
+            let (tokens, prec) = parser($src);
+            let mut p = Parser::new(&tokens, &prec);
+            p.parse_expr()
+        }};
+    }
+
+    /// Convenience: parse a definition from `src`.
+    macro_rules! parse_def {
+        ($src:expr) => {{
+            let (tokens, prec) = parser($src);
+            let mut p = Parser::new(&tokens, &prec);
+            p.parse_definition()
+        }};
+    }
+
+    /// Convenience: parse an extern from `src`.
+    macro_rules! parse_extern {
+        ($src:expr) => {{
+            let (tokens, prec) = parser($src);
+            let mut p = Parser::new(&tokens, &prec);
+            p.parse_extern()
+        }};
+    }
+
+    /// Convenience: parse a top-level expression from `src`.
+    macro_rules! parse_toplevel {
+        ($src:expr) => {{
+            let (tokens, prec) = parser($src);
+            let mut p = Parser::new(&tokens, &prec);
+            p.parse_toplevel_expr()
+        }};
+    }
+
+    #[test]
+    fn current_returns_first_token() {
+        let (tokens, prec) = parser("def");
+        let p = Parser::new(&tokens, &prec);
+        assert_eq!(p.current(), Ok(Kind::Def));
+    }
+
+    #[test]
+    fn current_on_empty_slice_returns_eof() {
+        let prec = default_prec();
+        let p = Parser::new(&[], &prec);
+        assert_matches!(p.current(), Err(ParseError::UnexpectedEof));
+    }
+
+    #[test]
+    fn advance_moves_cursor() {
+        let (tokens, prec) = parser("def extern");
+        let mut p = Parser::new(&tokens, &prec);
+        p.advance().unwrap();
+        assert_eq!(p.current(), Ok(Kind::Extern));
+    }
+
+    #[test]
+    fn advance_past_end_returns_eof_error() {
+        let (tokens, prec) = parser("x");
+        let mut p = Parser::new(&tokens, &prec);
+        let err = p.advance().unwrap_err();
+        assert_matches!(err, ParseError::UnexpectedEof);
+    }
+
+    #[test]
+    fn advance_unchecked_does_not_fail_at_eof() {
+        let (tokens, prec) = parser("x");
+        let mut p = Parser::new(&tokens, &prec);
+        p.advance_unchecked(); // moves past 'x'
+        assert!(p.is_eof());
+        p.advance_unchecked(); // must not panic
+        assert!(p.is_eof());
+    }
+
+    #[test]
+    fn is_eof_false_when_tokens_remain() {
+        let (tokens, prec) = parser("x");
+        let p = Parser::new(&tokens, &prec);
+        assert!(!p.is_eof());
+    }
+
+    #[test]
+    fn is_eof_true_after_all_tokens_consumed() {
+        let (tokens, prec) = parser("x");
+        let mut p = Parser::new(&tokens, &prec);
+        p.advance_unchecked();
+        assert!(p.is_eof());
+    }
+
+    #[test]
+    fn skip_for_recovery_advances_and_returns_true_when_more_tokens() {
+        let (tokens, prec) = parser("x y");
+        let mut p = Parser::new(&tokens, &prec);
+        let more = p.skip_for_recovery();
+        assert!(more);
+        assert_eq!(p.current(), Ok(Kind::Ident("y")));
+    }
+
+    #[test]
+    fn skip_for_recovery_returns_false_at_eof() {
+        let (tokens, prec) = parser("x");
+        let mut p = Parser::new(&tokens, &prec);
+        let more = p.skip_for_recovery();
+        assert!(!more);
+    }
+
+    #[test]
+    fn tok_precedence_known_op() {
+        let (tokens, prec) = parser("+");
+        let p = Parser::new(&tokens, &prec);
+        assert_eq!(p.tok_precedence(), Some(20));
+    }
+
+    #[test]
+    fn tok_precedence_unknown_op() {
+        let (tokens, prec) = parser("%");
+        let p = Parser::new(&tokens, &prec);
+        assert_eq!(p.tok_precedence(), None);
+    }
+
+    #[test]
+    fn tok_precedence_non_op_token() {
+        let (tokens, prec) = parser("def");
+        let p = Parser::new(&tokens, &prec);
+        assert_eq!(p.tok_precedence(), None);
+    }
+
+    #[test]
+    fn num_expr_integer() {
+        let expr = parse_expr!("42").unwrap();
+        assert_eq!(expr, Expr::Number(42.0));
+    }
+
+    #[test]
+    #[expect(clippy::approx_constant)]
+    fn num_expr_float() {
+        let expr = parse_expr!("3.14").unwrap();
+        assert_matches!(expr, Expr::Number(v) if (v - 3.14).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn num_expr_zero() {
+        let expr = parse_expr!("0").unwrap();
+        assert_eq!(expr, Expr::Number(0.0));
+    }
+
+    #[test]
+    fn ident_expr_plain_variable() {
+        let expr = parse_expr!("x").unwrap();
+        assert_eq!(expr, Expr::Variable("x".to_owned()));
+    }
+
+    #[test]
+    fn ident_expr_call_no_args() {
+        let expr = parse_expr!("foo()").unwrap();
+        assert_eq!(expr, Expr::Call { name: "foo".to_owned(), args: vec![] });
+    }
+
+    #[test]
+    fn ident_expr_call_one_arg() {
+        let expr = parse_expr!("sin(x)").unwrap();
+        assert_eq!(expr, Expr::Call {
+            name: "sin".to_owned(),
+            args: vec![Expr::Variable("x".to_owned())]
+        });
+    }
+
+    #[test]
+    fn ident_expr_call_multiple_args() {
+        let expr = parse_expr!("foo(a, b, c)").unwrap();
+        assert_eq!(expr, Expr::Call {
+            name: "foo".to_owned(),
+            args: vec![
+                Expr::Variable("a".to_owned()),
+                Expr::Variable("b".to_owned()),
+                Expr::Variable("c".to_owned()),
+            ]
+        });
+    }
+
+    #[test]
+    fn ident_expr_call_with_expr_arg() {
+        // foo(1+2) — arg is itself a binary expression
+        let expr = parse_expr!("foo(1+2)").unwrap();
+        assert_matches!(
+            expr,
+            Expr::Call { ref name, ref args }
+            if name == "foo" && args.len() == 1
+        );
+    }
+
+    #[test]
+    fn ident_expr_call_missing_rparen_returns_error() {
+        let err = parse_expr!("foo(a, b").unwrap_err();
+        assert_matches!(err, ParseError::UnexpectedEof);
+    }
+
+    #[test]
+    fn ident_expr_call_bad_separator_returns_error() {
+        let err = parse_expr!("foo(a b)").unwrap_err();
+        assert_matches!(err, ParseError::ExpectedCommaOrRParen(_));
+    }
+
+    // ── parse_paren_expr ──────────────────────────────────────────────────────
+
+    #[test]
+    fn paren_expr_simple() {
+        let expr = parse_expr!("(42)").unwrap();
+        assert_eq!(expr, Expr::Number(42.0));
+    }
+
+    #[test]
+    fn paren_expr_nested() {
+        let expr = parse_expr!("((x))").unwrap();
+        assert_eq!(expr, Expr::Variable("x".to_owned()));
+    }
+
+    #[test]
+    fn paren_expr_with_binop() {
+        let expr = parse_expr!("(1+2)").unwrap();
+        assert_matches!(expr, Expr::Binary { op: '+', .. });
+    }
+
+    #[test]
+    fn paren_expr_missing_rparen_returns_error() {
+        let err = parse_expr!("(x").unwrap_err();
+        assert_matches!(err, ParseError::UnexpectedEof | ParseError::ExpectedRParen(_));
+    }
+
+    // ── parse_bin_expr (Pratt / precedence climbing) ──────────────────────────
+
+    #[test]
+    fn binop_add() {
+        let expr = parse_expr!("x+y").unwrap();
+        assert_eq!(expr, Expr::Binary {
+            op: '+',
+            lhs: Box::new(Expr::Variable("x".to_owned())),
+            rhs: Box::new(Expr::Variable("y".to_owned())),
+        });
+    }
+
+    #[test]
+    fn binop_left_associative() {
+        // x+y+z should parse as (x+y)+z
+        let expr = parse_expr!("x+y+z").unwrap();
+        assert_matches!(
+            expr,
+            Expr::Binary {
+                op: '+',
+                lhs,
+                ..
+            }
+            if matches!(*lhs, Expr::Binary { op: '+', .. })
+        );
+    }
+
+    #[test]
+    fn binop_precedence_mul_over_add() {
+        // x+y*z should parse as x+(y*z)
+        let expr = parse_expr!("x+y*z").unwrap();
+        assert_matches!(
+            expr,
+            Expr::Binary {
+                op: '+',
+                rhs,
+                ..
+            }
+            if matches!(*rhs, Expr::Binary { op: '*', .. })
+        );
+    }
+
+    #[test]
+    fn binop_precedence_parens_override() {
+        // (x+y)*z — parens make + bind tighter
+        let expr = parse_expr!("(x+y)*z").unwrap();
+        assert_matches!(
+            expr,
+            Expr::Binary {
+                op: '*',
+                lhs,
+                ..
+            }
+            if matches!(*lhs, Expr::Binary { op: '+', .. })
+        );
+    }
+
+    #[test]
+    fn binop_all_arithmetic_ops_parse() {
+        for op in ['+', '-', '*', '/'] {
+            let src = format!("x{op}y");
+            let expr = parse_expr!(&src).unwrap();
+            assert!(
+                matches!(expr, Expr::Binary { op: o, .. } if o == op),
+                "operator '{op}' failed to parse"
+            );
+        }
+    }
+
+    #[test]
+    fn binop_comparison_lt() {
+        let expr = parse_expr!("x<y").unwrap();
+        assert_matches!(expr, Expr::Binary { op: '<', .. });
+    }
+
+    #[test]
+    fn binop_unknown_op_not_consumed() {
+        // '%' is not in the precedence table — the parser should stop and
+        // return just `x`, leaving '%' unconsumed.
+        let (tokens, prec) = parser("x%y");
+        let mut p = Parser::new(&tokens, &prec);
+        let expr = p.parse_expr().unwrap();
+        assert_eq!(expr, Expr::Variable("x".to_owned()));
+        // cursor must be sitting on '%'
+        assert_eq!(p.current(), Ok(Kind::Op('%')));
+    }
+
+    #[test]
+    fn binop_complex_expression() {
+        // a*a + 2*a*b + b*b — the tutorial's quadratic test case
+        let expr = parse_expr!("a*a + 2*a*b + b*b").unwrap();
+        // Top level must be '+'
+        assert_matches!(expr, Expr::Binary { op: '+', .. });
+    }
+
+    #[test]
+    fn primary_dispatches_to_number() {
+        let expr = parse_expr!("1").unwrap();
+        assert_matches!(expr, Expr::Number(_));
+    }
+
+    #[test]
+    fn primary_dispatches_to_ident() {
+        let expr = parse_expr!("x").unwrap();
+        assert_matches!(expr, Expr::Variable(_));
+    }
+
+    #[test]
+    fn primary_dispatches_to_paren() {
+        let expr = parse_expr!("(1)").unwrap();
+        assert_matches!(expr, Expr::Number(_));
+    }
+
+    #[test]
+    fn primary_unknown_token_returns_error() {
+        // ';' is not a valid primary expression start
+        let err = parse_expr!(";").unwrap_err();
+        assert_matches!(err, ParseError::ExpectedExpr(_));
+    }
+
+    #[test]
+    fn prototype_no_args() {
+        let func = parse_extern!("extern foo()").unwrap();
+        assert_eq!(func.proto.name, "foo");
+        assert!(func.proto.args.is_empty());
+    }
+
+    #[test]
+    fn prototype_one_arg() {
+        let func = parse_extern!("extern sin(x)").unwrap();
+        assert_eq!(func.proto.args, vec!["x"]);
+    }
+
+    #[test]
+    fn prototype_multiple_args() {
+        let func = parse_extern!("extern foo(a b c)").unwrap();
+        assert_eq!(func.proto.args, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn prototype_missing_lparen_returns_error() {
+        let err = parse_extern!("extern foo x)").unwrap_err();
+        assert_matches!(err, ParseError::ExpectedLParen(_));
+    }
+
+    #[test]
+    fn prototype_missing_rparen_returns_error() {
+        let err = parse_extern!("extern foo(x").unwrap_err();
+        assert_matches!(err, ParseError::UnexpectedEof | ParseError::ExpectedRParen(_));
+    }
+
+    #[test]
+    fn prototype_missing_name_returns_error() {
+        let err = parse_extern!("extern (x)").unwrap_err();
+        assert_matches!(err, ParseError::ExpectedPrototypeName(_));
+    }
+
+    #[test]
+    fn definition_simple() {
+        let func = parse_def!("def foo(x) x").unwrap();
+        assert_eq!(func.proto.name, "foo");
+        assert_eq!(func.proto.args, vec!["x"]);
+        assert_eq!(func.body, Some(Expr::Variable("x".to_owned())));
+    }
+
+    #[test]
+    fn definition_two_args_with_body() {
+        let func = parse_def!("def add(a b) a+b").unwrap();
+        assert_eq!(func.proto.args, vec!["a", "b"]);
+        assert_matches!(func.body, Some(Expr::Binary { op: '+', .. }));
+    }
+
+    #[test]
+    fn definition_body_is_some() {
+        let func = parse_def!("def id(x) x").unwrap();
+        assert!(func.body.is_some());
+    }
+
+    #[test]
+    fn definition_missing_body_returns_error() {
+        let err = parse_def!("def foo(x)").unwrap_err();
+        assert_matches!(err, ParseError::UnexpectedEof);
+    }
+
+    #[test]
+    fn definition_missing_prototype_returns_error() {
+        let err = parse_def!("def (x) x").unwrap_err();
+        assert_matches!(err, ParseError::ExpectedPrototypeName(_));
+    }
+
+    #[test]
+    fn extern_body_is_none() {
+        let func = parse_extern!("extern cos(x)").unwrap();
+        assert!(func.body.is_none());
+    }
+
+    #[test]
+    fn extern_proto_name_correct() {
+        let func = parse_extern!("extern atan2(y x)").unwrap();
+        assert_eq!(func.proto.name, "atan2");
+        assert_eq!(func.proto.args, vec!["y", "x"]);
+    }
+
+    #[test]
+    fn toplevel_wraps_in_anon_proto() {
+        let func = parse_toplevel!("4+5").unwrap();
+        assert_eq!(func.proto.name, "__anon_expr");
+        assert!(func.proto.args.is_empty());
+    }
+
+    #[test]
+    fn toplevel_body_is_the_expression() {
+        let func = parse_toplevel!("42").unwrap();
+        assert_eq!(func.body, Some(Expr::Number(42.0)));
+    }
+
+    #[test]
+    fn toplevel_complex_expression() {
+        let func = parse_toplevel!("foo(a, 4.0) + bar(31337)").unwrap();
+        assert_matches!(func.body, Some(Expr::Binary { op: '+', .. }));
+    }
+
+    #[test]
+    fn multi_dispatch_def_then_toplevel() {
+        // Simulates how main.rs drives the parser loop over one line.
+        let (tokens, prec) = parser("def foo(x y) x+y y");
+        let mut p = Parser::new(&tokens, &prec);
+
+        let def = p.parse_definition().unwrap();
+        assert_eq!(def.proto.name, "foo");
+
+        let top = p.parse_toplevel_expr().unwrap();
+        assert_eq!(top.body, Some(Expr::Variable("y".to_owned())));
+    }
+
+    #[test]
+    fn multi_dispatch_extern_then_call() {
+        let (tokens, prec) = parser("extern sin(x) sin(1)");
+        let mut p = Parser::new(&tokens, &prec);
+
+        let ext = p.parse_extern().unwrap();
+        assert_eq!(ext.proto.name, "sin");
+
+        let top = p.parse_toplevel_expr().unwrap();
+        assert_matches!(top.body, Some(Expr::Call { .. }));
+    }
+
+    #[test]
+    fn skip_for_recovery_then_parse_succeeds() {
+        // Simulate a bad token followed by a valid expression.
+        let (tokens, prec) = parser(") x");
+        let mut p = Parser::new(&tokens, &prec);
+
+        // First parse fails on ')'.
+        let err = p.parse_expr();
+        assert!(err.is_err());
+
+        // Recovery: skip the bad token.
+        p.skip_for_recovery();
+
+        // Next parse should succeed.
+        let expr = p.parse_expr().unwrap();
+        assert_eq!(expr, Expr::Variable("x".to_owned()));
+    }
+
+    #[test]
+    fn cloned_parser_is_independent() {
+        let (tokens, prec) = parser("x y");
+        let original = Parser::new(&tokens, &prec);
+        let mut clone = original.clone();
+        let mut original = original;
+
+        // Advance original — clone must be unaffected.
+        original.advance_unchecked();
+        assert_eq!(original.current(), Ok(Kind::Ident("y")));
+        assert_eq!(clone.current(), Ok(Kind::Ident("x")));
+
+        // And vice versa.
+        clone.advance_unchecked();
+        assert_eq!(clone.current(), Ok(Kind::Ident("y")));
+    }
+}
+use core::fmt;
+
+/// The token includes its kind together with its source span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Token<'a> {
+    /// Every distinct kind of token the lexer can produce.
+    pub kind: Kind<'a>,
+    /// A byte-range into the original source string.
+    pub span: Span,
+}
+
+/// A byte-range into the original source string. Used for diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+/// Every distinct kind of token the lexer can produce.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind<'a> {
+    Eof,
+    Comma,
+    Comment,
+
+    // Keywords
+    Def,
+    Extern,
+    Else,
+    For,
+    If,
+    In,
+    Then,
+    Var,
+
+    // Extension keywords
+    Binary,
+    Unary,
+
+    // Literals / identifiers
+    Ident(&'a str),
+    Number(f64),
+    // Named constants: π, etc.
+    // Constant(&'a str, f64),
+
+    // Punctuation
+    LParen,
+    RParen,
+
+    /// A single-character operator (+, -, *, /, <, =, ...)
+    Op(char),
+
+    // Emitted when the lexer cannot classify a byte sequence.
+    Invalid(&'a str),
+}
+
+impl fmt::Display for Kind<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Eof => write!(f, "<eof>"),
+            Self::Comma => write!(f, ","),
+            Self::Comment => write!(f, "#"),
+            Self::Def => write!(f, "def"),
+            Self::Extern => write!(f, "extern"),
+            Self::Else => write!(f, "else"),
+            Self::For => write!(f, "for"),
+            Self::If => write!(f, "if"),
+            Self::In => write!(f, "in"),
+            Self::Then => write!(f, "then"),
+            Self::Var => write!(f, "var"),
+            Self::Binary => write!(f, "binary"),
+            Self::Unary => write!(f, "unary"),
+            // Ident and Invalid both display their text content.
+            // The caller (error messages) determines whether to label it.
+            Self::Ident(v) | Self::Invalid(v) => write!(f, "{v}"),
+            Self::Number(v) => write!(f, "{v}"),
+            Self::LParen => write!(f, "("),
+            Self::RParen => write!(f, ")"),
+            Self::Op(v) => write!(f, "{v}"),
+        }
+    }
+}

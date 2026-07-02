@@ -1,17 +1,28 @@
 use core::iter;
 use std::collections::HashMap;
 
-use inkwell::FloatPredicate;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
-use inkwell::execution_engine::ExecutionEngine;
+use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::Module;
+use inkwell::passes::PassBuilderOptions;
+use inkwell::targets::{CodeModel, RelocMode, Target, TargetMachine};
 use inkwell::values::{FloatValue, FunctionValue};
+use inkwell::{FloatPredicate, OptimizationLevel};
 
 use crate::ast::{Expr, Function, Prototype};
 use crate::error::CodegenError;
 
 pub type SymbolTable<'ctx> = HashMap<String, FloatValue<'ctx>>;
+
+/// the synthetic prototype wrapping a top-level expression.
+pub const ANON_FN: &str = "__anon_expr";
+
+/// Type of a JIT-compiled `double()` function.
+///
+/// It is the signature every top-level expr (`__anon_expr`) compiles down
+/// to.
+type AnonFn = unsafe extern "C" fn() -> f64;
 
 pub struct CodeGen<'ctx> {
     pub context: &'ctx Context,
@@ -26,17 +37,62 @@ pub struct CodeGen<'ctx> {
 }
 
 impl<'ctx> CodeGen<'ctx> {
-    #[must_use]
-    pub fn new(name: &str, ctx: &'ctx Context) -> Self {
-        let module = ctx.create_module(name);
-        let builder = ctx.create_builder();
-        Self {
-            context: ctx,
-            module,
-            builder,
-            symbols: SymbolTable::default(),
-            engine: unimplemented!(),
-        }
+    /// Optimizes the module, JIT-executes the given function (assumed to be
+    /// a zero-argument `double()` — i.e. `__anon_expr`), returns its result,
+    /// then removes the function from the module.
+    ///
+    /// # Safety-relevant note
+    /// `get_function` is `unsafe` because inkwell can't verify the requested
+    /// type signature matches the JIT'd function — a mismatch is UB. We rely
+    /// on `proto()` always emitting `double()` for zero-arg anonymous exprs.
+    pub fn run_anon(&self, fn_val: FunctionValue<'ctx>) -> Result<f64, CodegenError> {
+        self.optimize()?;
+
+        let name = fn_val.get_name().to_str().map_err(|e| CodegenError::Unknown(e.to_string()))?;
+
+        #[expect(unsafe_code)]
+        let result = unsafe {
+            let jit_fn: JitFunction<'_, AnonFn> =
+                self.engine.get_function(name).map_err(|e| CodegenError::Unknown(e.to_string()))?;
+
+            jit_fn.call()
+        };
+
+        #[expect(unsafe_code)]
+        unsafe {
+            fn_val.delete();
+        };
+
+        Ok(result)
+    }
+
+    /// Runs a standard optimization pipeline over the whole module.
+    ///
+    /// This is the modern `PassBuilder` equivalent of the tutorial's
+    /// per-function `FunctionPassManager` (`InstCombine`, Reassociate,
+    /// GVN, `SimplifyCFG`); inkwell 0.9 / LLVM 22 only expose pass
+    /// pipelines at module granularity now.
+    pub fn optimize(&self) -> Result<(), CodegenError> {
+        let cpu = "generic";
+        let features = "";
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple)?;
+        let passes = "instcombine,reassociate,gvn,simplifycfg";
+
+        let machine = target
+            .create_target_machine(
+                &triple,
+                cpu,
+                features,
+                OptimizationLevel::Aggressive,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| CodegenError::Unknown("failed to create target machine".to_owned()))?;
+
+        self.module.run_passes(passes, &machine, PassBuilderOptions::create())?;
+
+        Ok(())
     }
 
     pub fn func(&mut self, func: &Function) -> Result<FunctionValue<'ctx>, CodegenError> {
@@ -185,16 +241,33 @@ impl<'ctx> CodeGen<'ctx> {
 mod tests {
     use core::assert_matches;
 
-    use inkwell::context::Context;
-
-    use crate::ast::{Expr, Function, Prototype};
-    use crate::codegen::CodeGen;
-    use crate::error::CodegenError;
+    use super::*;
 
     /// Construct a fresh `Codegen` tied to the provided `Context`.
     /// Every test that needs a `Codegen` calls this so the context lifetime
     /// is owned by the test frame, not by the codegen struct.
-    fn make_codegen(ctx: &Context) -> CodeGen<'_> { CodeGen::new("test_module", ctx) }
+    fn make_codegen(ctx: &Context) -> CodeGen<'_> {
+        let module = ctx.create_module("test_module");
+        let builder = ctx.create_builder();
+        let engine = module.create_execution_engine().unwrap();
+        let target_data = engine.get_target_data();
+        let data_layout = target_data.get_data_layout();
+        module.set_data_layout(&data_layout);
+
+        CodeGen { context: ctx, builder, module, engine, symbols: SymbolTable::default() }
+    }
+
+    #[expect(dead_code)]
+    fn make_jit_codegen(ctx: &Context) -> CodeGen<'_> {
+        let module = ctx.create_module("test_module");
+        let builder = ctx.create_builder();
+        let engine = module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+        let target_data = engine.get_target_data();
+        let data_layout = target_data.get_data_layout();
+        module.set_data_layout(&data_layout);
+
+        CodeGen { context: ctx, builder, module, engine, symbols: SymbolTable::default() }
+    }
 
     /// Build a `Prototype` with the given name and argument names.
     fn proto(name: &str, args: &[&str]) -> Prototype {
