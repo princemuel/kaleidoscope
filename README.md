@@ -40,7 +40,7 @@ define double @__anon_expr() { ... }
 **Tutorial chapter:** [Ch. 1 - Kaleidoscope Introduction and the Lexer][ch1]
 
 The lexer transforms a `&str` into a stream of `TokenKind` values.
-It operates on a pre-loaded string via a byte-index cursor — no `getchar()`,
+It operates on a pre-loaded string via a byte-index cursor.  no `getchar()`,
 no global state.
 
 Key implementation choices vs the C++ reference:
@@ -51,8 +51,8 @@ Key implementation choices vs the C++ reference:
 | `IdentifierStr` / `NumVal` globals | Data carried inside `TokenKind` variants     |
 | Recursive comment handling         | Iterator `loop`                              |
 | `strtod` accepts `"1.2.3"`         | Strict: digit-run then optional `.digit-run` |
-| `".4"` parsed as `0.4`             | Matched — dot-led floats supported           |
-| `"1."` parsed as a float           | Fixed — produces `Number(1.0)` + `Op('.')`   |
+| `".4"` parsed as `0.4`             | Matched. dot-led floats supported           |
+| `"1."` parsed as a float           | Fixed. produces `Number(1.0)` + `Op('.')`   |
 
 The lexer implements `Iterator<Item = Token<'a>>` (kind + span) and exposes
 a `.tokens()` adaptor that strips spans for callers that don't need them.
@@ -63,7 +63,7 @@ sees them.
 
 ### Stage 2: Parser & AST `(tag: stage2-parser)`
 
-**Tutorial chapter:** [Ch. 2 — Implementing a Parser and AST][ch2]
+**Tutorial chapter:** [Ch. 2.  Implementing a Parser and AST][ch2]
 
 The parser is a hand-written recursive-descent parser with Pratt
 (precedence-climbing) for binary expressions. It operates on a
@@ -98,12 +98,12 @@ error-recovery pattern.
 
 Two cursor advance variants make intent explicit at every call site:
 
-- `advance()` — hard fail: a token _must_ follow (e.g. after an operator)
-- `advance_unchecked()` — soft: EOF is grammatically acceptable (e.g. after `)`)
+- `advance()`.  hard fail: a token _must_ follow (e.g. after an operator)
+- `advance_unchecked()`.  soft: EOF is grammatically acceptable (e.g. after `)`)
 
 ### Stage 3: LLVM IR Codegen `(tag: stage3-codegen)`
 
-**Tutorial chapter:** [Ch. 3 — Code Generation to LLVM IR][ch3]
+**Tutorial chapter:** [Ch. 3.  Code Generation to LLVM IR][ch3]
 
 IR is emitted via [`inkwell`][inkwell], a safe Rust wrapper over the LLVM C API.
 All LLVM objects share a lifetime `'ctx` tied to an owning `Context`:
@@ -124,7 +124,7 @@ a self-referential struct.
 
 | `Expr` variant         | LLVM output                                                 |
 | ---------------------- | ----------------------------------------------------------- |
-| `Number(f)`            | `ConstantFP` — may constant-fold immediately                |
+| `Number(f)`            | `ConstantFP`.  may constant-fold immediately                |
 | `Variable(n)`          | Lookup in `symbols`; error if absent                        |
 | `Binary { '+' }`       | `build_float_add` → `fadd`                                  |
 | `Binary { '-' }`       | `build_float_sub` → `fsub`                                  |
@@ -270,12 +270,12 @@ cargo test -- --nocapture
 
 The test suite covers:
 
-- **Lexer** — every token kind, span correctness, iterator fusing, clone
+- **Lexer**. Every token kind, span correctness, iterator fusing, clone
   independence, comment filtering, dot-led floats, number boundary cases
-- **Parser** — every parse method, all error variants, Pratt precedence
+- **Parser**. Every parse method, all error variants, Pratt precedence
   and associativity, multi-dispatch (semicolon-separated statements),
   error recovery
-- **Codegen** — constant folding, all binary operators, symbol table
+- **Codegen**. Constant folding, all binary operators, symbol table
   scoping, extern→def resolution (the tutorial bug fix), redefinition
   rejection, failed-body cleanup
 
@@ -307,7 +307,7 @@ The top-level `Error` type wraps both plus `io::Error`.
 | -------------------------------- | --------------------------------------------------- | --------------------------------------------------------- |
 | Lexer input                      | `getchar()` / stdin, char-at-a-time                 | Pre-loaded `&str`, byte cursor                            |
 | Token payload                    | Global `IdentifierStr`, `NumVal`                    | Carried inside `TokenKind` variants                       |
-| Number lexing                    | Accepts `"1.2.3"` as a number                       | Rejected — stricter grammar                               |
+| Number lexing                    | Accepts `"1.2.3"` as a number                       | stricter grammar                                          |
 | `".4"`                           | Parsed as `0.4`                                     | Matched                                                   |
 | AST node dispatch                | `virtual codegen()` on each class                   | `match` on `Expr` in `Codegen::expr`                      |
 | Extern / def types               | Separate `PrototypeAST` / `FunctionAST`             | Single `Function { body: Option<Expr> }`                  |
@@ -327,8 +327,6 @@ Licensed under either of:
 
 - [Apache License, Version 2.0](LICENSE-APACHE)
 - [MIT License](LICENSE-MIT)
-
-at your option.
 
 [tutorial]: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/index.html
 [ch1]: https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl01.html
